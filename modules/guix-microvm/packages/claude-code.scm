@@ -33,13 +33,14 @@
           (add-after 'install 'install-wrapper
             (lambda _
               (let ((wrapper (string-append #$output "/bin/claude"))
-                    (libc (string-append #$(this-package-input "glibc") "/lib")))
+                    (libc #$(file-append (this-package-input "glibc") "/lib")))
                 (mkdir-p (dirname wrapper))
                 (call-with-output-file wrapper
                   (lambda (port)
                     (format port "#!~a
 export DISABLE_AUTOUPDATER=1
-exec ~a/ld-linux-x86-64.so.2 --library-path ~a ~a/libexec/claude-code/claude \"$@\"~%"
+exec ~a/ld-linux-x86-64.so.2 --library-path ~a \\
+  ~a/libexec/claude-code/claude \"$@\"~%"
                             #$(file-append bash-minimal "/bin/sh")
                             libc libc #$output)))
                 (chmod wrapper #o755)))))))
