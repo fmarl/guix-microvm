@@ -1,4 +1,4 @@
-(define-module (guix-vms packages virtiofsd)
+(define-module (guix-microvm packages virtiofsd)
   #:use-module (guix packages)
   #:use-module (guix download)
   #:use-module (guix build-system cargo)
@@ -24,8 +24,9 @@
      (list #:install-source? #f))
     (native-inputs (list pkg-config))
     (inputs (cons* libcap-ng libseccomp
-                   (cargo-inputs 'virtiofsd
-                                 #:module '(guix-vms packages rust-crates))))
+                   (cargo-inputs
+                    'virtiofsd
+                    #:module '(guix-microvm packages rust-crates))))
     (home-page "https://gitlab.com/virtio-fs/virtiofsd")
     (synopsis "Vhost-user virtio-fs device backend")
     (description "virtiofsd is a vhost-user backend for virtio-fs, which

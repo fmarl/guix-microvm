@@ -93,11 +93,12 @@ not the operating system.
 
 ### vm.scm
 The project's VM, which must evaluate to a `microvm`, see [The microvm
-record](#the-microvm-record).  `(guix-vms microvm)`, `(guix-vms base)` and
-`(gnu)` are available.  A predefined operating system with more resources:
+record](#the-microvm-record).  `(guix-microvm microvm)`, `(guix-microvm
+base)` and `(gnu)` are available.  A predefined operating system with more
+resources:
 
 ```scheme
-(use-modules (guix-vms vms claude))
+(use-modules (guix-microvm vms claude))
 
 (microvm
   (operating-system %claude-system)
@@ -150,7 +151,7 @@ launcher is killed, and 255 with "lost the connection to the VM" if the
 guest could not report it.
 
 ## The microvm record
-`(guix-vms microvm)` provides the `microvm` record.  It is file-like: it
+`(guix-microvm microvm)` provides the `microvm` record.  It is file-like: it
 lowers to the VM's *launcher*, so it can be built with `guix build`,
 installed with `guix home`, or used in a gexp.
 
@@ -163,7 +164,7 @@ installed with `guix home`, or used in a gexp.
 | `memory-size` | `4096` | Memory in MiB. |
 | `cpu-count` | `4` | Virtual CPUs. |
 | `qemu` | `qemu` | The QEMU package. |
-| `virtiofsd` | `virtiofsd` | The virtiofsd package, from `(guix-vms packages virtiofsd)`. |
+| `virtiofsd` | `virtiofsd` | The virtiofsd package, from `(guix-microvm packages virtiofsd)`. |
 | `passt` | `passt` | The passt package. |
 
 The launcher, `run-NAME`, is what `guix microvm` runs:
@@ -179,7 +180,7 @@ loads that manifest's profile; the launcher refers to the profile, so it
 keeps it from being garbage-collected.
 
 ## Operating systems
-`(guix-vms base)` provides `%base-vm`, the operating system all VMs
+`(guix-microvm base)` provides `%base-vm`, the operating system all VMs
 inherit.  A derived system should keep:
 
 - `kernel`, `initrd-modules`, `firmware`, `bootloader` and `file-systems`:
@@ -204,17 +205,17 @@ It also exports:
 | `%vm-network` | The guest's static network, see [Network](#network). |
 | `%vm-name-server` | `"10.0.2.3"`, the address passt answers DNS queries on. |
 
-`(guix-vms kernel)` provides `linux-microvm`, linux-libre configured with
-`make tinyconfig` and `modules/guix-vms/kernel/microvm.config` merged on
+`(guix-microvm kernel)` provides `linux-microvm`, linux-libre configured with
+`make tinyconfig` and `modules/guix-microvm/kernel/microvm.config` merged on
 top.
 
 ## Predefined VMs
 `guix microvm --vm=NAME` finds NAME among the `microvm`s exported by the
-modules under `guix-vms/vms/` on the load path.
+modules under `guix-microvm/vms/` on the load path.
 
 ### claude-vm
 Claude Code with Git, Make, ripgrep, curl, less, gzip and procps, from
-`(guix-vms vms claude)`, which also exports its operating system,
+`(guix-microvm vms claude)`, which also exports its operating system,
 `%claude-system`.  Claude Code's configuration lives in the guest's home,
 `~/.claude`, so it persists per project.  Non-essential traffic is
 disabled and so is the auto-updater: Claude Code's version is that of the
@@ -225,9 +226,9 @@ a secret:
 
 ```
 guix microvm --vm=claude-vm -- claude setup-token
-mkdir -p ~/.local/share/guix-vms/claude/secrets
-echo TOKEN > ~/.local/share/guix-vms/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
-chmod 600 ~/.local/share/guix-vms/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
+mkdir -p ~/.local/share/guix-microvm/claude/secrets
+echo TOKEN > ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
+chmod 600 ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 `ANTHROPIC_API_KEY` is passed the same way, for an API key.
@@ -238,7 +239,7 @@ The guest sees only what it needs of the host:
 | Path | Access | |
 |---|---|---|
 | `/work` | read-write | The project directory. |
-| `/home` | read-write | `~/.local/share/guix-vms/NAME/PROJECT`, NAME being the VM's host name and PROJECT the URI-encoded project directory.  The guest user's home, `/home/user`, with its caches and configuration, persists there, separately for each project and VM. |
+| `/home` | read-write | `~/.local/share/guix-microvm/NAME/PROJECT`, NAME being the VM's host name and PROJECT the URI-encoded project directory.  The guest user's home, `/home/user`, with its caches and configuration, persists there, separately for each project and VM. |
 | `/gnu/store` | read-only | Only the store items of the operating system and of the profile. |
 
 Everything else is a tmpfs, lost when the VM stops.  There is no access to
@@ -252,7 +253,7 @@ guest: the store is read-only, so packages come from `manifest.scm`.
 
 When the command exits, the launcher has the guest flush its writes to the
 shares, then stops QEMU.  The guest does not shut down.  Serial console
-output goes to `~/.local/share/guix-vms/NAME/PROJECT.log`.
+output goes to `~/.local/share/guix-microvm/NAME/PROJECT.log`.
 
 Commits made in the guest use the Git identity of the project directory
 on the host, `git config user.name` and `user.email`; `GIT_AUTHOR_*` and
@@ -285,7 +286,7 @@ Vite.
 ## Secrets
 A `microvm`'s `secrets` names environment variables.  For each, the
 launcher reads the file of the same name in
-`~/.local/share/guix-vms/NAME/secrets`, if it exists, strips trailing
+`~/.local/share/guix-microvm/NAME/secrets`, if it exists, strips trailing
 whitespace and passes its contents to the guest in the SSH environment,
 not on a command line.  The files are shared by all projects of the VM.
 Everything in the guest can read the variables.
@@ -300,7 +301,7 @@ Read by the launcher:
 | `VM_BOOT_TIMEOUT` | `120` | Seconds to wait for SSH. |
 | `VM_FS_CACHE` | `auto` | virtiofsd's `--cache` for the shares: `auto`, `always`, `never` or `metadata`. |
 | `VM_SERIAL` | `file:LOG` | A QEMU chardev for the serial console, e.g. `stdio`. |
-| `XDG_DATA_HOME` | `~/.local/share` | Where `guix-vms/` lives. |
+| `XDG_DATA_HOME` | `~/.local/share` | Where `guix-microvm/` lives. |
 | `XDG_RUNTIME_DIR` | `/tmp` | Where the sockets of a run live. |
 | `GIT_AUTHOR_*`, `GIT_COMMITTER_*` | project's Git identity | Passed to the guest. |
 | `LANG`, `COLORTERM` | | Passed to the guest. |
@@ -308,12 +309,12 @@ Read by the launcher:
 ## Files on the host
 ```
 ~/.config/guix/microvm-authorized-directories   projects to load files from
-~/.local/share/guix-vms/
+~/.local/share/guix-microvm/
   ssh/id_ed25519{,.pub}            the launcher's SSH key, created on first use
   NAME/secrets/VARIABLE            secrets of the VM NAME
   NAME/PROJECT/                    /home of the VM NAME for PROJECT
   NAME/PROJECT.log                 its serial console output
-$XDG_RUNTIME_DIR/guix-vms.XXXXXX/  sockets of a run, removed at its end
+$XDG_RUNTIME_DIR/guix-microvm.XXXXXX/  sockets of a run, removed at its end
 ```
 
 ## How it works
@@ -326,7 +327,7 @@ the store file names of everything it needs:
   from their reference graphs;
 - QEMU, virtiofsd, passt, OpenSSH, socat, Git and util-linux's `unshare`.
 
-The logic of the launcher is in `(guix-vms build microvm)`.  When run, it:
+The logic of the launcher is in `(guix-microvm build microvm)`.  When run, it:
 
 1. checks the directory, `/dev/kvm` and `/dev/vhost-vsock`, and creates the
    SSH key and the home directory if needed;
@@ -406,7 +407,7 @@ environment variable it sends.
 .guix-channel              the channel, with its modules in modules/
 channels.scm               channels to pin, channels-lock.scm the pinned ones
 manifest.scm, .envrc       the development environment
-modules/guix-vms/
+modules/guix-microvm/
   base.scm                 %base-vm and the guest's constants
   microvm.scm              the microvm record and its launcher
   build/microvm.scm        the launcher's logic, run on the host
@@ -425,11 +426,11 @@ make check     # evaluate all predefined VMs and guix microvm
 make update    # pin channels.scm's channels to their latest commits
 ```
 
-To add a predefined VM, add `modules/guix-vms/vms/NAME.scm`, a module
-`(guix-vms vms NAME)` exporting `NAME-vm`, a `microvm`, which `make check`
+To add a predefined VM, add `modules/guix-microvm/vms/NAME.scm`, a module
+`(guix-microvm vms NAME)` exporting `NAME-vm`, a `microvm`, which `make check`
 evaluates.
 
-To change the kernel, edit `modules/guix-vms/kernel/microvm.config`.  The
+To change the kernel, edit `modules/guix-microvm/kernel/microvm.config`.  The
 build fails if an option does not end up in the kernel's configuration,
 which happens when one of its dependencies is missing; add those too.
 Each change rebuilds the kernel.
