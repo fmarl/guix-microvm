@@ -153,32 +153,108 @@ and returns its PID.  Stop the programs when PROC returns or exits."
                   (false-if-exception (waitpid pid)))
                 pids))))
 
+(define (overflow-id kind)
+  "Return the ID unmapped users or groups have in a user namespace, KIND being
+\"uid\" or \"gid\"."
+  (call-with-input-file (string-append "/proc/sys/kernel/overflow" kind)
+    read))
+
+(define* (ssh-arguments destination command
+                        #:key key socat cid port (send-env '())
+                        (options '()))
+  "Return the arguments of ssh to run COMMAND at DESTINATION, reached over
+vsock at CID and PORT with KEY."
+  `("ssh" "-F" "/dev/null" "-q"
+    "-i" ,key "-o" "IdentitiesOnly=yes"
+    "-o" "StrictHostKeyChecking=no"
+    "-o" "UserKnownHostsFile=/dev/null"
+    "-o" "ForwardAgent=no" "-o" "ForwardX11=no"
+    "-o" ,(string-append "SendEnv=" (string-join send-env))
+    "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a" socat cid port)
+    ,@options
+    ,destination
+    ,command))
+
+(define (remote-command command wrapper status-file)
+  "Return the shell command that runs COMMAND, or a login shell if it is
+empty, in /work, prefixed by WRAPPER, and writes its exit status to
+STATUS-FILE."
+  (string-append "cd /work && "
+                 (string-join (append wrapper
+                                      (if (null? command)
+                                          '("\"$SHELL\"" "-l")
+                                          (map shell-quote command))))
+                 "; echo $? > " status-file))
+
+(define (serial-options log)
+  "Return QEMU's options for the serial console, appended to LOG unless
+VM_SERIAL names another chardev."
+  (match (getenv "VM_SERIAL")
+    (#f `("-chardev" ,(string-append "file,id=serial,path=" log ",append=on")
+          "-serial" "chardev:serial"))
+    (serial `("-serial" ,serial))))
+
+(define* (qemu-arguments #:key kernel initrd kernel-arguments memory cpus cid
+                         network serial devices)
+  "Return QEMU's arguments to boot KERNEL on a microvm with MEMORY MiB and
+CPUS, the vsock address CID, the NIC served at NETWORK, and DEVICES."
+  `("-M" "microvm,acpi=off,rtc=on,memory-backend=mem"
+    "-cpu" "host" "-enable-kvm"
+    "-m" ,(number->string memory) "-smp" ,(number->string cpus)
+    "-object" ,(format #f "memory-backend-memfd,id=mem,size=~aM,share=on"
+                       memory)
+    "-nodefaults" "-no-user-config" "-no-reboot"
+    "-display" "none" "-monitor" "none"
+    ,@serial
+    "-kernel" ,kernel "-initrd" ,initrd
+    "-append" ,(string-join kernel-arguments)
+    "-object" "rng-random,filename=/dev/urandom,id=rng"
+    "-device" "virtio-rng-device,rng=rng"
+    "-device" ,(string-append "vhost-vsock-device,guest-cid=" cid)
+    "-netdev" ,(string-append "stream,id=net,server=off,"
+                              "addr.type=unix,addr.path=" network)
+    "-device" "virtio-net-device,netdev=net"
+    ,@devices))
+
+(define (check-devices!)
+  ;; Without KVM, QEMU would keep running stale translated code for pages
+  ;; virtiofsd writes into guest memory.
+  (for-each (lambda (device)
+              (unless (access? device (logior R_OK W_OK))
+                (fail "~a is not accessible" device)))
+            '("/dev/kvm" "/dev/vhost-vsock")))
+
+(define (exit-on-signals!)
+  "Exit, which stops the VM, on the signals that would otherwise kill this
+process."
+  (for-each (lambda (signal)
+              (sigaction signal
+                (lambda (signal)
+                  (exit (+ 128 signal)))))
+            (list SIGINT SIGTERM SIGHUP)))
+
 (define* (run-microvm args
-                      #:key name kernel initrd kernel-arguments
-                      store-items profile
+                      #:key name default-command kernel initrd
+                      kernel-arguments store-items profile
                       memory-size cpu-count user uid gid ssh-port
                       network-options
-                      qemu virtiofsd passt ssh ssh-keygen socat git
+                      qemu virtiofsd passt waypipe ssh ssh-keygen socat git
                       unshare mount-store secrets)
   "Run the microvm NAME with the command line ARGS, and return the exit status
-of the command run in it."
+of the command run in it, by default DEFAULT-COMMAND.  With WAYPIPE, Wayland
+clients in the VM show on the host's Wayland display."
   (parameterize ((%program-name (string-append "run-" name)))
     (let* ((share-home? directory command (parse-arguments args))
            (directory (if (directory-exists? directory)
                           (canonicalize-path directory)
-                          (fail "~a is not a directory" directory))))
+                          (fail "~a is not a directory" directory)))
+           (command (if (null? command) default-command command)))
       (when (and (not share-home?) (contains-home? directory))
         (fail "not sharing ~a, which contains the home directory, without \
 --share-home" directory))
-      ;; Without KVM, QEMU would keep running stale translated code for pages
-      ;; virtiofsd writes into guest memory.
-      (for-each (lambda (device)
-                  (unless (access? device (logior R_OK W_OK))
-                    (fail "~a is not accessible" device)))
-                '("/dev/kvm" "/dev/vhost-vsock"))
-      (set-git-identity! git directory)
-      (when profile
-        (setenv "GUIX_MICROVM_PROFILE" profile))
+      (when (and waypipe (not (getenv "WAYLAND_DISPLAY")))
+        (fail "WAYLAND_DISPLAY is not set: ~a needs a Wayland session" name))
+      (check-devices!)
 
       (let* ((state (string-append (getenv* "XDG_DATA_HOME"
                                             (string-append (getenv "HOME")
@@ -188,40 +264,37 @@ of the command run in it."
              (log (string-append home ".log"))
              (key (string-append state "/ssh/id_ed25519"))
              (key-blob (ssh-key-blob ssh-keygen key))
-             (memory (number->string (getenv-number "VM_MEMORY" memory-size)))
              ;; Unique among running VMs, as this process' PID.
              (cid (number->string (getpid)))
+             (guest-waypipe-socket (format #f "/run/user/~a/waypipe.sock"
+                                           uid))
              (status-file "/tmp/guix-microvm-status"))
-        (define (ssh-arguments options command)
-          `("ssh" "-F" "/dev/null" "-q"
-            "-i" ,key "-o" "IdentitiesOnly=yes"
-            "-o" "StrictHostKeyChecking=no"
-            "-o" "UserKnownHostsFile=/dev/null"
-            "-o" "ForwardAgent=no" "-o" "ForwardX11=no"
-            "-o" ,(string-join
-                   (cons "SendEnv=LANG COLORTERM GIT_AUTHOR_* GIT_COMMITTER_* \
-GUIX_MICROVM_PROFILE"
-                         secrets))
-            "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a"
-                          socat cid ssh-port)
-            ,@options
-            ,(string-append user "@" name)
-            ,command))
-
-        (define* (ssh* options command
-                       #:key (output (current-output-port))
-                       (error (current-error-port)))
-          (exit-status
-           (cdr (waitpid (spawn ssh (ssh-arguments options command)
-                                #:output output #:error error)))))
+        (define (ssh-arguments* options command)
+          (ssh-arguments (string-append user "@" name) command
+                         #:key key #:socat socat #:cid cid #:port ssh-port
+                         #:send-env `("LANG" "COLORTERM" "GIT_AUTHOR_*"
+                                      "GIT_COMMITTER_*" "GUIX_MICROVM_PROFILE"
+                                      ,@secrets)
+                         #:options options))
 
         (define batch-options
           '("-n" "-o" "BatchMode=yes" "-o" "ConnectTimeout=5"))
 
+        (define (ssh-status options command)
+          (exit-status
+           (cdr (waitpid (spawn ssh (ssh-arguments* options command))))))
+
+        (define (ssh-succeeds? command)
+          (zero? (exit-status
+                  (cdr (waitpid (spawn ssh (ssh-arguments* batch-options
+                                                           command)
+                                       #:output (force %null-port)
+                                       #:error (force %null-port)))))))
+
         (define (ssh-output command)
           (match (pipe)
             ((in . out)
-             (let ((pid (spawn ssh (ssh-arguments batch-options command)
+             (let ((pid (spawn ssh (ssh-arguments* batch-options command)
                                #:output out #:error (force %null-port))))
                (close-port out)
                (let ((output (get-string-all in)))
@@ -229,13 +302,12 @@ GUIX_MICROVM_PROFILE"
                  (waitpid pid)
                  output)))))
 
-        (mkdir-p home)
+        (set-git-identity! git directory)
+        (when profile
+          (setenv "GUIX_MICROVM_PROFILE" profile))
         (load-secrets! (string-append state "/" name "/secrets") secrets)
-        (for-each (lambda (signal)
-                    (sigaction signal
-                      (lambda (signal)
-                        (exit (+ 128 signal)))))
-                  (list SIGINT SIGTERM SIGHUP))
+        (mkdir-p home)
+        (exit-on-signals!)
 
         (call-with-temporary-directory
          (lambda (tmp)
@@ -243,8 +315,10 @@ GUIX_MICROVM_PROFILE"
             (lambda (start)
               ;; virtiofsd runs sandboxed, as root of a user namespace in
               ;; which the host user is root and other users are nobody.
-              (define* (virtiofs tag shared #:key (wrapper '()) id-map
-                                 (options '()))
+              ;; It maps the guest's UID and GID with UID-MAP and GID-MAP.
+              ;; Return QEMU's options for the share.
+              (define* (virtiofs tag shared #:key (wrapper '())
+                                 uid-map gid-map (options '()))
                 (let ((socket (string-append tmp "/" tag ".sock")))
                   (wait-for-socket
                    socket
@@ -254,8 +328,8 @@ GUIX_MICROVM_PROFILE"
                             "--socket-path" ,socket "--sandbox" "namespace"
                             "--log-level" "error"
                             "--cache" ,(getenv* "VM_FS_CACHE" "auto")
-                            "--translate-uid" ,(id-map uid "uid")
-                            "--translate-gid" ,(id-map gid "gid")
+                            "--translate-uid" ,uid-map
+                            "--translate-gid" ,gid-map
                             ,@options)))
                   (list "-chardev"
                         (string-append "socket,id=" tag ",path=" socket)
@@ -263,10 +337,11 @@ GUIX_MICROVM_PROFILE"
                         (string-append "vhost-user-fs-device,chardev=" tag
                                        ",tag=" tag))))
 
+              ;; The guest user owns the host user's files.
               (define (owned-share tag shared)
                 (virtiofs tag shared
-                          #:id-map (lambda (id _)
-                                     (format #f "map:~a:0:1" id))))
+                          #:uid-map (format #f "map:~a:0:1" uid)
+                          #:gid-map (format #f "map:~a:0:1" gid)))
 
               ;; Only the store items the VM needs, owned by root as on the
               ;; host, where they are nobody's in the namespace.
@@ -275,16 +350,15 @@ GUIX_MICROVM_PROFILE"
                   (mkdir root)
                   (virtiofs "store" root
                             #:wrapper (list mount-store store-items root)
-                            #:id-map
-                            (lambda (_ kind)
-                              (format #f "map:0:~a:1"
-                                      (call-with-input-file
-                                          (string-append
-                                           "/proc/sys/kernel/overflow" kind)
-                                        read)))
+                            #:uid-map (format #f "map:0:~a:1"
+                                              (overflow-id "uid"))
+                            #:gid-map (format #f "map:0:~a:1"
+                                              (overflow-id "gid"))
                             #:options '("--readonly"))))
 
               (define network (string-append tmp "/network.sock"))
+              (define waypipe-socket (string-append tmp "/waypipe.sock"))
+
               (wait-for-socket
                network
                (apply start passt
@@ -292,43 +366,33 @@ GUIX_MICROVM_PROFILE"
                       "--no-map-gw" "--socket" network
                       network-options))
 
-              (define shares
-                (append (store-share)
-                        (owned-share "work" directory)
-                        (owned-share "home" home)))
+              ;; Forwarded to the guest by the SSH session running the
+              ;; command, rather than over vsock, where other guests could
+              ;; connect.  The security context keeps privileged protocols,
+              ;; e.g. screen capture, from the guest, if the compositor
+              ;; supports it.
+              (when waypipe
+                (wait-for-socket
+                 waypipe-socket
+                 (start waypipe "--socket" waypipe-socket "--no-gpu"
+                        "--secctx" (string-append "guix-microvm." name)
+                        "client")))
 
-              (define (start-qemu)
-                (apply start qemu
-                       `("-M" "microvm,acpi=off,rtc=on,memory-backend=mem"
-                         "-cpu" "host" "-enable-kvm" "-m" ,memory
-                         "-smp" ,(number->string
-                                  (getenv-number "VM_CPUS" cpu-count))
-                         "-object" ,(string-append
-                                     "memory-backend-memfd,id=mem,size="
-                                     memory "M,share=on")
-                         "-nodefaults" "-no-user-config" "-no-reboot"
-                         "-display" "none" "-monitor" "none"
-                         ,@(match (getenv "VM_SERIAL")
-                             (#f `("-chardev"
-                                   ,(string-append "file,id=serial,path="
-                                                   log ",append=on")
-                                   "-serial" "chardev:serial"))
-                             (serial `("-serial" ,serial)))
-                         "-kernel" ,kernel "-initrd" ,initrd
-                         "-append" ,(string-join
-                                     (cons* "console=ttyS0"
-                                            (string-append
-                                             "guix-microvm.ssh-key=" key-blob)
-                                            kernel-arguments))
-                         "-object" "rng-random,filename=/dev/urandom,id=rng"
-                         "-device" "virtio-rng-device,rng=rng"
-                         "-device" ,(string-append
-                                     "vhost-vsock-device,guest-cid=" cid)
-                         "-netdev" ,(string-append
-                                     "stream,id=net,server=off,"
-                                     "addr.type=unix,addr.path=" network)
-                         "-device" "virtio-net-device,netdev=net"
-                         ,@shares)))
+              (define arguments
+                (qemu-arguments
+                 #:kernel kernel #:initrd initrd
+                 #:kernel-arguments
+                 (cons* "console=ttyS0"
+                        (string-append "guix-microvm.ssh-key=" key-blob)
+                        kernel-arguments)
+                 #:memory (getenv-number "VM_MEMORY" memory-size)
+                 #:cpus (getenv-number "VM_CPUS" cpu-count)
+                 #:cid cid
+                 #:network network
+                 #:serial (serial-options log)
+                 #:devices (append (store-share)
+                                   (owned-share "work" directory)
+                                   (owned-share "home" home))))
 
               ;; QEMU's own messages, e.g. about being stopped, go to the
               ;; log too, after the serial console's.
@@ -338,15 +402,13 @@ GUIX_MICROVM_PROFILE"
                                   (open-file log "a"))
                   (lambda (port)
                     (parameterize ((current-error-port port))
-                      (start-qemu)))))
+                      (apply start qemu arguments)))))
 
               (define deadline
                 (+ (current-time) (getenv-number "VM_BOOT_TIMEOUT" 120)))
 
               (let loop ()
-                (unless (zero? (ssh* batch-options "true"
-                                     #:output (force %null-port)
-                                     #:error (force %null-port)))
+                (unless (ssh-succeeds? "true")
                   (unless (alive? vm)
                     (fail "the VM exited, see ~a" log))
                   (when (> (current-time) deadline)
@@ -354,14 +416,20 @@ GUIX_MICROVM_PROFILE"
                   (sleep 1)
                   (loop)))
 
-              (let ((ssh-status
-                     (ssh* '("-t")
-                           (string-append
-                            "cd /work && "
-                            (if (null? command)
-                                "\"$SHELL\" -l"
-                                (string-join (map shell-quote command)))
-                            "; echo $? > " status-file))))
+              (let ((status
+                     (ssh-status
+                      (if waypipe
+                          (list "-t" "-o" "ExitOnForwardFailure=yes"
+                                "-R" (string-append guest-waypipe-socket ":"
+                                                    waypipe-socket))
+                          '("-t"))
+                      (remote-command command
+                                      (if waypipe
+                                          (list waypipe "--socket"
+                                                guest-waypipe-socket
+                                                "--no-gpu" "server" "--")
+                                          '())
+                                      status-file))))
                 ;; Flush what the guest wrote to the shares before QEMU is
                 ;; stopped, and get the command's exit status, which ssh
                 ;; cannot tell apart from its own.
@@ -372,4 +440,4 @@ GUIX_MICROVM_PROFILE"
                       (format (current-error-port)
                               "~a: lost the connection to the VM~%"
                               (%program-name))
-                      ssh-status)))))))))))
+                      status)))))))))))
