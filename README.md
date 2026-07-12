@@ -10,6 +10,7 @@ guix microvm                            # a login shell in the VM, in /work
 guix microvm -- make check              # a command, its exit status is kept
 guix microvm --vm=claude-vm -- claude   # a predefined VM, Claude Code
 guix microvm -p 3000 -- npm run dev     # with localhost:3000 forwarded
+guix microvm --vm=librewolf-vm          # a browser, in the host's Wayland session
 ```
 
 The guest sees the project, its own home and the store items it needs, and
@@ -32,8 +33,9 @@ to the command's exit.
 - `/dev/vhost-vsock`, from the `vhost_vsock` kernel module, readable and
   writable by the user.
 - Unprivileged user namespaces, for passt and the virtiofsd sandboxes.
+- For VMs with `wayland?`, a Wayland session on the host.
 - Guix.  Everything else (QEMU, virtiofsd, passt, OpenSSH, socat, Git,
-  util-linux) comes from the store.
+  util-linux, waypipe) comes from the store.
 
 ## Installation
 As a channel, in `~/.config/guix/channels.scm`, followed by `guix pull`:
@@ -158,6 +160,8 @@ installed with `guix home`, or used in a gexp.
 | Field | Default | |
 |---|---|---|
 | `operating-system` | | The guest's `operating-system`, inheriting `%base-vm`.  Its host name names the VM. |
+| `command` | `'()` | The command to run without one on the command line; a login shell if empty. |
+| `wayland?` | `#f` | Whether Wayland clients in the guest show on the host's Wayland display, see [Wayland](#wayland). |
 | `manifest` | `#f` | A manifest whose profile the guest loads.  `guix microvm` sets it from `manifest.scm`. |
 | `ports` | `'()` | TCP ports to forward from the host's loopback: numbers, or `(HOST . GUEST)` pairs. |
 | `secrets` | `'()` | Names of environment variables to pass to the guest, see [Secrets](#secrets). |
@@ -166,6 +170,7 @@ installed with `guix home`, or used in a gexp.
 | `qemu` | `qemu` | The QEMU package. |
 | `virtiofsd` | `virtiofsd` | The virtiofsd package, from `(guix-microvm packages virtiofsd)`. |
 | `passt` | `passt` | The passt package. |
+| `waypipe` | `waypipe` | The waypipe package. |
 
 The launcher, `run-NAME`, is what `guix microvm` runs:
 
@@ -233,6 +238,21 @@ chmod 600 ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
 
 `ANTHROPIC_API_KEY` is passed the same way, for an API key.
 
+### librewolf-vm
+LibreWolf, shown in the host's Wayland session, from `(guix-microvm vms
+librewolf)`, which also exports `%librewolf-system`.  Run it from the
+directory downloads should go to; its profile persists per directory, so
+directories can serve as separate identities:
+
+```
+mkdir -p ~/Downloads/browser && cd ~/Downloads/browser
+guix microvm --vm=librewolf-vm
+```
+
+It renders in software, without GPU: browsing is smooth, video takes CPU.
+The file dialogs show the guest's file system, so uploads come from
+`/work`.  There is no audio.
+
 ## The guest
 The guest sees only what it needs of the host:
 
@@ -283,6 +303,22 @@ for TCP.  Connections arrive on the guest's address, not its loopback, so
 servers must listen on all addresses, e.g. `npm run dev -- --host` for
 Vite.
 
+## Wayland
+With `wayland?`, Wayland clients in the guest show on the host's Wayland
+display through waypipe: the launcher runs a waypipe client on the host,
+the command runs under a waypipe server in the guest, and the SSH session
+running the command forwards the client's socket to the guest.  Unlike a
+vsock port, it is out of other guests' reach.  There is no GPU in the
+guest, so clients render in software.
+Clipboard and multiple windows work through the Wayland protocol.
+
+The waypipe client creates a security context, with the application ID
+`guix-microvm.NAME`, so that compositors supporting it, like niri, keep
+privileged protocols from the guest.  Under niri, the guest sees no
+protocol to capture the screen, read the clipboard in the background, list
+other windows or inject input.  Compositors without security contexts
+expose what they expose to any client.
+
 ## Secrets
 A `microvm`'s `secrets` names environment variables.  For each, the
 launcher reads the file of the same name in
@@ -325,14 +361,16 @@ the store file names of everything it needs:
 - the profile of the manifest;
 - a list of the store items of the operating system and of the profile,
   from their reference graphs;
-- QEMU, virtiofsd, passt, OpenSSH, socat, Git and util-linux's `unshare`.
+- QEMU, virtiofsd, passt, waypipe, OpenSSH, socat, Git and util-linux's
+  `unshare`.
 
 The logic of the launcher is in `(guix-microvm build microvm)`.  When run, it:
 
 1. checks the directory, `/dev/kvm` and `/dev/vhost-vsock`, and creates the
    SSH key and the home directory if needed;
 2. reads the Git identity of the project and the secrets;
-3. starts passt with the guest's network and the forwarded ports;
+3. starts passt with the guest's network and the forwarded ports, and,
+   with `wayland?`, a waypipe client on the host's Wayland display;
 4. starts three virtiofsd, each with `--sandbox namespace` as root of a
    user namespace of its own, in which the host user is root:
    - `store`: in a mount namespace, the listed store items are bind-mounted
@@ -348,7 +386,8 @@ The logic of the launcher is in `(guix-microvm build microvm)`.  When run, it:
    a service writes the key to `/etc/ssh/authorized_keys.d/user`, socat
    bridges vsock port 2222 to sshd, `/etc/profile.d` loads the profile;
 7. polls SSH over vsock until the guest answers, then runs the command in
-   `/work` with a terminal, recording its exit status in the guest;
+   `/work` with a terminal, under a waypipe server with `wayland?`,
+   recording its exit status in the guest;
 8. has the guest `sync`, reads the exit status, and stops QEMU, virtiofsd
    and passt, also on SIGINT, SIGTERM or SIGHUP.
 
@@ -365,7 +404,9 @@ KVM's hardware isolation.  From inside, it can:
   configuration files of the host user with secrets in them;
 - reach the Internet, as the host user, without restriction: what it can
   read, it can send away, the project included;
-- read its secrets.
+- read its secrets;
+- with `wayland?`, show windows on the host's display and use the
+  clipboard while focused, see [Wayland](#wayland).
 
 It cannot reach the host's loopback, the homes of other projects, the
 host's home, or SSH and GPG agents.  It cannot become root in the guest.
@@ -388,6 +429,7 @@ environment variable it sends.
   and Claude Code needs a login per project unless the token is set.
 - Changing packages takes a new run, with an updated `manifest.scm`.
 - x86_64 only.
+- VMs with `wayland?` render in software and have no audio.
 
 ## Troubleshooting
 | Message | |
