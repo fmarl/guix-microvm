@@ -1,4 +1,3 @@
-;; Channels to pin with `make update'
 (list (channel
        (name 'guix)
        (url "https://codeberg.org/guix/guix")
