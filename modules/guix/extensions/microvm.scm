@@ -13,7 +13,8 @@
   #:use-module (gnu system)
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
-  #:use-module ((guix-microvm build microvm) #:select (contains-home?))
+  #:use-module ((guix-microvm build microvm)
+                #:select (contains-home? exit-status))
   #:use-module (ice-9 match)
   #:use-module (ice-9 rdelim)
   #:use-module (srfi srfi-1)
@@ -204,13 +205,11 @@ built."
 
 (define (run-launcher launcher directory command share-home?)
   "Run LAUNCHER with DIRECTORY and COMMAND, and return its exit status."
-  (match (waitpid (spawn launcher
-                         `(,launcher
-                           ,@(if share-home? '("--share-home") '())
-                           ,directory "--" ,@command)))
-    ((_ . status)
-     (or (status:exit-val status)
-         (+ 128 (status:term-sig status))))))
+  (exit-status
+   (cdr (waitpid (spawn launcher
+                        `(,launcher
+                          ,@(if share-home? '("--share-home") '())
+                          ,directory "--" ,@command))))))
 
 (define-command (guix-microvm . args)
   (category development)
@@ -221,7 +220,6 @@ built."
            (project vm-file manifest-file (project-files opts))
            (directory (or project (getcwd)))
            (share-home? (assoc-ref opts 'share-home?)))
-      ;; Checked by the launcher too, but before building here.
       (when (and (contains-home? directory) (not share-home?))
         (leave (G_ "not sharing ~a, which contains the home directory, \
 without --share-home~%")
@@ -241,8 +239,7 @@ without --share-home~%")
                   ;; With nothing to build, 'build-notifier' lets a dry run
                   ;; get this far.
                   (unless (assoc-ref opts 'dry-run?)
-                    ;; Keep the launcher and the profile it refers to while
-                    ;; the VM runs, until the store connection is closed.
+                    ;; Until the store connection is closed.
                     (add-temp-root store launcher)
                     (exit (run-launcher launcher directory command
                                         share-home?))))))))))))
