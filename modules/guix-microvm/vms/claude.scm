@@ -27,7 +27,7 @@
                            session-environment-service-type
                            '(("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
                               . "1")))
-           (operating-system-user-services %base-vm)))))
+           %microvm-base-services))))
 
 (define claude-vm
   (microvm

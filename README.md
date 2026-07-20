@@ -33,6 +33,7 @@ cd ~/src/project
 guix microvm                            # login shell in /work
 guix microvm -- make check              # run a command
 guix microvm -p 3000 -- npm run dev     # forward localhost:3000
+guix microvm --stateless -- make check  # keep no home, no changes to /work
 guix microvm --vm=claude-vm -- claude   # Claude Code
 guix microvm --vm=librewolf-vm          # LibreWolf on the host's display
 ```
@@ -66,7 +67,19 @@ The VM, if not the default one:
 ```
 
 Fields: `operating-system` (inheriting `%base-vm`), `command`, `wayland?`,
-`ports`, `secrets`, `memory-size`, `cpu-count`.
+`stateless?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
+
+The system needs `microvm-guest-service-type`, part of
+`%microvm-base-services`.  The launcher reads its configuration: `user`,
+`uid`, `gid`, `ssh-port`, `network`, `name-server`.
+
+```scheme
+(modify-services %microvm-base-services
+  (microvm-guest-service-type
+   config => (microvm-guest-configuration
+               (inherit config)
+               (user "dev"))))
+```
 
 ### Claude Code
 Log in once for all projects:
@@ -81,6 +94,10 @@ echo TOKEN > ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
 - `~/.local/share/guix-microvm/NAME/PROJECT/`: the VM's home, per project
 - `~/.local/share/guix-microvm/NAME/PROJECT.log`: its console output
 - `~/.local/share/guix-microvm/NAME/secrets/`: variables in `secrets`
+
+With `--stateless` or `(stateless? #t)`, the home, the log and the SSH key
+live in `$XDG_RUNTIME_DIR` until the VM exits.  Changes to `/work` go to an
+overlay in the VM's memory; don't change the project on the host meanwhile.
 
 ## Development
 ```

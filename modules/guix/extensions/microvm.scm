@@ -17,9 +17,9 @@
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
   #:use-module ((guix-microvm build microvm)
-                #:select (contains-home? exit-status))
+                #:select (contains-home? wait-for-exit))
   #:use-module (ice-9 match)
-  #:use-module (ice-9 rdelim)
+  #:use-module (ice-9 textual-ports)
   #:use-module ((rnrs bytevectors) #:select (string->utf8))
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
@@ -41,6 +41,9 @@ packages of manifest.scm.\n"))
   (display (G_ "
       --share-home       share the project directory even if it is the home
                          directory or one of its parents"))
+  (display (G_ "
+      --stateless        keep nothing: give the microvm a fresh home and
+                         discard its changes to the project directory"))
   (display (G_ "
       --allow            allow the current vm.scm and manifest.scm to run"))
   (display (G_ "
@@ -66,6 +69,9 @@ packages of manifest.scm.\n"))
          (option '("share-home") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'share-home? #t result)))
+         (option '("stateless") #f #f
+                 (lambda (opt name arg result)
+                   (alist-cons 'stateless? #t result)))
          (option '("allow") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'allow? #t result)))
@@ -127,8 +133,10 @@ vm.scm or manifest.scm, or #f."
           ((string=? directory "/") #f)
           (else (loop (dirname directory))))))
 
-(define (allowed-file)
-  (string-append (config-directory #:ensure? #f) "/microvm-allowed"))
+(define* (allowed-file #:key ensure?)
+  "Return the file listing the allowed projects, creating its directory if
+ENSURE?."
+  (string-append (config-directory #:ensure? ensure?) "/microvm-allowed"))
 
 (define (project-digest project)
   "Return a digest of vm.scm and manifest.scm in PROJECT, which changes when
@@ -147,73 +155,74 @@ either changes, appears or disappears."
            '("vm.scm" "manifest.scm"))
       "\n")))))
 
+(define (allowed-project line)
+  "Return the directory and digest on LINE of the allowed file, as a pair, or
+#f."
+  (match (string-index line #\space)
+    (#f #f)
+    (index (cons (string-drop line (+ index 1))
+                 (string-take line index)))))
+
 (define (allowed-projects)
   "Return the allowed projects, as an alist of directories and digests."
   (catch 'system-error
     (lambda ()
-      (call-with-input-file (allowed-file)
-        (lambda (port)
-          (let loop ((projects '()))
-            (match (read-line port)
-              ((? eof-object?) projects)
-              (line
-               (match (string-index line #\space)
-                 (#f (loop projects))
-                 (index
-                  (loop (alist-cons (string-drop line (+ index 1))
-                                    (string-take line index)
-                                    projects))))))))))
+      (filter-map allowed-project
+                  (string-split (call-with-input-file (allowed-file)
+                                  get-string-all)
+                                #\newline)))
     (const '())))
 
 (define (allow-project! project)
+  (unless project
+    (leave (G_ "no vm.scm or manifest.scm to allow~%")))
   (let ((others (alist-delete project (allowed-projects))))
-    (config-directory)
-    (with-atomic-file-output (allowed-file)
+    (with-atomic-file-output (allowed-file #:ensure? #t)
       (lambda (port)
         (for-each (match-lambda
                     ((directory . digest)
                      (format port "~a ~a~%" digest directory)))
                   (alist-cons project (project-digest project) others))))))
 
-(define (project-files opts)
-  "Return the project directory, or #f, and its vm.scm, unless OPTS name a
-predefined microvm, and manifest.scm, or #f."
-  (let ((project (project-directory)))
-    (define (project-file name)
-      (let ((file (and project (string-append project "/" name))))
-        (and file (file-exists? file) file)))
+(define (project-allowed? project)
+  (equal? (assoc-ref (allowed-projects) project)
+          (project-digest project)))
 
-    (when (assoc-ref opts 'allow?)
-      (unless project
-        (leave (G_ "no vm.scm or manifest.scm to allow~%")))
-      (allow-project! project))
+(define (project-file project name)
+  "Return the file NAME in PROJECT if it exists, or #f."
+  (let ((file (and project (string-append project "/" name))))
+    (and file (file-exists? file) file)))
 
-    (let ((vm (and (not (assoc-ref opts 'vm))
-                   (project-file "vm.scm")))
-          (manifest (project-file "manifest.scm")))
-      ;; Both run on the host, and the VM can change them.
-      (when (and (or vm manifest)
-                 (not (equal? (assoc-ref (allowed-projects) project)
-                              (project-digest project))))
-        (report-error (G_ "not loading vm.scm and manifest.scm from '~a': \
+(define (project-files opts project)
+  "Return PROJECT's vm.scm, unless OPTS name a predefined microvm, and
+manifest.scm, each or #f."
+  (values (and (not (assoc-ref opts 'vm))
+               (project-file project "vm.scm"))
+          (project-file project "manifest.scm")))
+
+(define (ensure-allowed project)
+  (unless (project-allowed? project)
+    (report-error (G_ "not loading vm.scm and manifest.scm from '~a': \
 they are new or changed~%")
-                      project)
-        (display-hint (G_ "They run on the host, and the VM can change them.
+                  project)
+    (display-hint (G_ "They run on the host, and the VM can change them.
 Review them, then run @command{guix microvm --allow}."))
-        (exit 1))
-      (values project vm manifest))))
+    (exit 1)))
+
+(define (load-object file kind valid? modules)
+  "Load FILE in MODULES and return its value, a KIND satisfying VALID?."
+  (info (G_ "loading ~a from '~a'...~%") kind file)
+  (let ((object (load* file modules)))
+    (if (valid? object)
+        object
+        (leave (G_ "~a: expected a ~a~%") file kind))))
 
 (define (load-microvm file)
-  (info (G_ "loading microvm from '~a'...~%") file)
-  (match (load* file '((guix-microvm microvm) (guix-microvm base) (gnu)))
-    ((? microvm? vm) vm)
-    (_ (leave (G_ "~a: expected a microvm~%") file))))
+  (load-object file "microvm" microvm?
+               '((guix-microvm microvm) (guix-microvm base) (gnu))))
 
 (define (load-manifest file)
-  (info (G_ "loading manifest from '~a'...~%") file)
-  (match (load* file '((guix profiles) (gnu)))
-    ((? manifest? manifest) manifest)
-    (_ (leave (G_ "~a: expected a manifest~%") file))))
+  (load-object file "manifest" manifest? '((guix profiles) (gnu))))
 
 (define (string->port str)
   (match (map string->number (string-split str #\:))
@@ -244,13 +253,39 @@ built."
       (built-derivations (list drv))
       (return (derivation->output-path drv)))))
 
-(define (run-launcher launcher directory command share-home?)
-  "Run LAUNCHER with DIRECTORY and COMMAND, and return its exit status."
-  (exit-status
-   (cdr (waitpid (spawn launcher
-                        `(,launcher
-                          ,@(if share-home? '("--share-home") '())
-                          ,directory "--" ,@command))))))
+(define (launcher-flags opts)
+  "Return the flags of the launcher OPTS set."
+  (filter-map (match-lambda
+                ((key . flag) (and (assoc-ref opts key) flag)))
+              '((share-home? . "--share-home")
+                (stateless? . "--stateless"))))
+
+(define (call-with-launcher opts vm proc)
+  "Build the launcher of VM as OPTS say and, unless they ask for a dry run,
+call PROC with its file name."
+  (with-store store
+    (set-build-options-from-command-line store opts)
+    (with-build-handler (build-notifier #:use-substitutes?
+                                        (assoc-ref opts 'substitutes?)
+                                        #:verbosity
+                                        (assoc-ref opts 'verbosity)
+                                        #:dry-run?
+                                        (assoc-ref opts 'dry-run?))
+      (parameterize ((%graft? (assoc-ref opts 'graft?)))
+        (with-status-verbosity (assoc-ref opts 'verbosity)
+          (let ((launcher (run-with-store store (built-launcher vm))))
+            ;; With nothing to build, 'build-notifier' lets a dry run get
+            ;; this far.
+            (unless (assoc-ref opts 'dry-run?)
+              ;; Until the store connection is closed.
+              (add-temp-root store launcher)
+              (proc launcher))))))))
+
+(define (run-launcher launcher directory command flags)
+  "Run LAUNCHER with FLAGS, DIRECTORY and COMMAND, and return its exit
+status."
+  (wait-for-exit
+   (spawn launcher `(,launcher ,@flags ,directory "--" ,@command))))
 
 (define-command (guix-microvm . args)
   (category development)
@@ -258,29 +293,19 @@ built."
 
   (with-error-handling
     (let* ((opts command (parse-arguments args))
-           (project vm-file manifest-file (project-files opts))
-           (directory (or project (getcwd)))
-           (share-home? (assoc-ref opts 'share-home?)))
-      (when (and (contains-home? directory) (not share-home?))
+           (project (project-directory))
+           (vm-file manifest-file (project-files opts project))
+           (directory (or project (getcwd))))
+      (when (assoc-ref opts 'allow?)
+        (allow-project! project))
+      (when (or vm-file manifest-file)
+        (ensure-allowed project))
+      (when (and (contains-home? directory (canonicalize-path (getenv "HOME")))
+                 (not (assoc-ref opts 'share-home?)))
         (leave (G_ "not sharing ~a, which contains the home directory, \
 without --share-home~%")
                directory))
-      (let ((vm (options->microvm opts vm-file manifest-file)))
-        (with-store store
-          (set-build-options-from-command-line store opts)
-          (with-build-handler (build-notifier #:use-substitutes?
-                                              (assoc-ref opts 'substitutes?)
-                                              #:verbosity
-                                              (assoc-ref opts 'verbosity)
-                                              #:dry-run?
-                                              (assoc-ref opts 'dry-run?))
-            (parameterize ((%graft? (assoc-ref opts 'graft?)))
-              (with-status-verbosity (assoc-ref opts 'verbosity)
-                (let ((launcher (run-with-store store (built-launcher vm))))
-                  ;; With nothing to build, 'build-notifier' lets a dry run
-                  ;; get this far.
-                  (unless (assoc-ref opts 'dry-run?)
-                    ;; Until the store connection is closed.
-                    (add-temp-root store launcher)
-                    (exit (run-launcher launcher directory command
-                                        share-home?))))))))))))
+      (call-with-launcher opts (options->microvm opts vm-file manifest-file)
+        (lambda (launcher)
+          (exit (run-launcher launcher directory command
+                              (launcher-flags opts))))))))

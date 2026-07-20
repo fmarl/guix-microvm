@@ -1,7 +1,9 @@
 (define-module (guix-microvm microvm)
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
+  #:use-module ((guix diagnostics) #:select (formatted-message))
   #:use-module (guix gexp)
+  #:use-module ((guix i18n) #:select (G_))
   #:use-module (guix modules)
   #:use-module (guix profiles)
   #:use-module (guix records)
@@ -13,6 +15,7 @@
   #:use-module (gnu packages ssh)
   #:use-module (gnu packages version-control)
   #:use-module (gnu packages virtualization)
+  #:use-module (gnu services)
   #:use-module (gnu services base)
   #:use-module (gnu system)
   #:use-module (gnu system file-systems)
@@ -23,6 +26,7 @@
             microvm-operating-system
             microvm-command
             microvm-wayland?
+            microvm-stateless?
             microvm-manifest
             microvm-ports
             microvm-secrets
@@ -36,6 +40,8 @@
                     (default '()))
   (wayland?         microvm-wayland?          ;Boolean
                     (default #f))
+  (stateless?       microvm-stateless?        ;Boolean
+                    (default #f))
   (manifest         microvm-manifest          ;<manifest> | #f
                     (default #f))
   (ports            microvm-ports             ;list of PORT | (HOST . GUEST)
@@ -47,6 +53,17 @@
   (cpu-count        microvm-cpu-count         ;integer
                     (default 4)))
 
+(define (guest-configuration os)
+  "Return the configuration of the microvm guest service of OS."
+  (match (find (lambda (service)
+                 (eq? (service-kind service) microvm-guest-service-type))
+               (operating-system-user-services os))
+    (#f (raise-exception
+         (formatted-message
+          (G_ "~a: the system lacks 'microvm-guest-service-type'")
+          (operating-system-host-name os))))
+    (service (service-value service))))
+
 (define (passt-network-options network name-server)
   "Return the options for passt to serve NETWORK, a <static-networking> with
 one address and route, and to answer DNS queries sent to NAME-SERVER."
@@ -57,7 +74,10 @@ one address and route, and to answer DNS queries sent to NAME-SERVER."
        ((ip prefix-length)
         (list "--address" ip "--netmask" prefix-length
               "--gateway" (network-route-gateway route)
-              "--dns-forward" name-server))))))
+              "--dns-forward" name-server))))
+    (_ (raise-exception
+        (formatted-message
+         (G_ "the microvm network needs one address and route"))))))
 
 (define (passt-port-options port)
   "Return the options for passt to forward PORT, a port number or a pair of
@@ -117,15 +137,32 @@ host and guest port numbers, from the host's loopback to the guest."
            (mount-store-items items root)
            (apply execl program program args)))))))
 
+(define (microvm-profile vm)
+  "Return the profile of VM's manifest, or #f."
+  (and=> (microvm-manifest vm)
+         (lambda (manifest)
+           (profile (content manifest)))))
+
+(define (microvm-store-roots vm os profile)
+  "Return the objects whose closures VM, running OS, sees in its store: OS,
+PROFILE, if any, and waypipe if VM is graphical."
+  (filter identity (list os profile (and (microvm-wayland? vm) waypipe))))
+
+(define (microvm-network-options vm guest)
+  "Return the options for passt to serve the network of GUEST, the
+configuration of VM's guest service, and forward VM's ports."
+  (append (passt-network-options (microvm-guest-network guest)
+                                 (microvm-guest-name-server guest))
+          (append-map passt-port-options (microvm-ports vm))))
+
 (define (microvm-launcher vm)
   "Return the launcher of VM, run-NAME [DIR] [-- COMMAND...], which boots VM,
 shares DIR at /work and runs COMMAND in it, as described in README.md."
   (let* ((os (microvm-operating-system vm))
          (name (operating-system-host-name os))
          (root (file-system-device (operating-system-root-file-system os)))
-         (project-profile (and=> (microvm-manifest vm)
-                                 (lambda (manifest)
-                                   (profile (content manifest)))))
+         (project-profile (microvm-profile vm))
+         (guest (guest-configuration os))
          (wayland? (microvm-wayland? vm)))
     (program-file
      (string-append "run-" name)
@@ -137,24 +174,22 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
             (cdr (command-line))
             #:name #$name
             #:default-command '#$(microvm-command vm)
+            #:stateless? #$(microvm-stateless? vm)
             #:kernel #$(operating-system-kernel-file os)
             #:initrd #$(file-append os "/initrd")
             #:kernel-arguments
             (list #$@(operating-system-kernel-arguments os root))
             #:store-items #$(store-items
-                             (filter identity
-                                     (list os project-profile
-                                           (and wayland? waypipe))))
+                             (microvm-store-roots vm os project-profile))
             #:profile #$project-profile
             #:memory-size #$(microvm-memory-size vm)
             #:cpu-count #$(microvm-cpu-count vm)
-            #:user #$%vm-user
-            #:uid #$%vm-uid
-            #:gid #$%vm-gid
-            #:ssh-port #$%vm-ssh-port
+            #:user #$(microvm-guest-user guest)
+            #:uid #$(microvm-guest-uid guest)
+            #:gid #$(microvm-guest-gid guest)
+            #:ssh-port #$(microvm-guest-ssh-port guest)
             #:network-options
-            '#$(append (passt-network-options %vm-network %vm-name-server)
-                       (append-map passt-port-options (microvm-ports vm)))
+            '#$(microvm-network-options vm guest)
             #:secrets '#$(microvm-secrets vm)
             #:qemu #$(file-append qemu "/bin/qemu-system-x86_64")
             #:virtiofsd #$(file-append virtiofsd "/bin/virtiofsd")
