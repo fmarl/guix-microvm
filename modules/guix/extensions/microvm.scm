@@ -16,6 +16,7 @@
   #:use-module (gnu system)
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
+  #:use-module (guix-microvm control)
   #:use-module ((guix-microvm build microvm)
                 #:select (contains-home? wait-for-exit))
   #:use-module (ice-9 match)
@@ -29,9 +30,13 @@
 
 (define (show-help)
   (display (G_ "Usage: guix microvm [OPTION]... [-- COMMAND...]
+   or: guix microvm usb attach|detach NAME VENDOR[:PRODUCT]
 Run COMMAND, or a login shell, in a microvm sharing the project directory at
 /work.  The microvm is the one vm.scm defines, or the base VM, with the
-packages of manifest.scm.\n"))
+packages of manifest.scm.
+
+Or give the running microvm NAME the host's USB device with the hexadecimal
+IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
   (display (G_ "
       --vm=NAME          run the predefined microvm NAME, e.g. claude-vm"))
   (display (G_ "
@@ -287,25 +292,60 @@ status."
   (wait-for-exit
    (spawn launcher `(,launcher ,@flags ,directory "--" ,@command))))
 
+(define (run-in-microvm args)
+  "Run the command ARGS specify in the project's microvm, and exit with its
+status."
+  (let* ((opts command (parse-arguments args))
+         (project (project-directory))
+         (vm-file manifest-file (project-files opts project))
+         (directory (or project (getcwd))))
+    (when (assoc-ref opts 'allow?)
+      (allow-project! project))
+    (when (or vm-file manifest-file)
+      (ensure-allowed project))
+    (when (and (contains-home? directory (canonicalize-path (getenv "HOME")))
+               (not (assoc-ref opts 'share-home?)))
+      (leave (G_ "not sharing ~a, which contains the home directory, \
+without --share-home~%")
+             directory))
+    (call-with-launcher opts (options->microvm opts vm-file manifest-file)
+      (lambda (launcher)
+        (exit (run-launcher launcher directory command
+                            (launcher-flags opts)))))))
+
+(define (find-running-vm name)
+  "Return the running microvm NAME, the one sharing the current project if
+several run."
+  (match (filter (compose (cut string=? name <>) running-vm-name)
+                 (running-vms))
+    (() (leave (G_ "no microvm '~a' is running~%") name))
+    ((vm) vm)
+    (vms
+     (let ((directory (canonicalize-path (or (project-directory) (getcwd)))))
+       (or (find (compose (cut string=? directory <>) running-vm-directory)
+                 vms)
+           (leave (G_ "several microvms '~a' are running, none sharing \
+'~a'~%")
+                  name directory))))))
+
+(define (control-usb args)
+  "Attach a host USB device to a running microvm or detach it, as ARGS say."
+  (match args
+    (((and action (or "attach" "detach")) name id)
+     (let* ((id (or (string->usb-id id)
+                    (leave (G_ "~a: expected VENDOR or VENDOR:PRODUCT~%")
+                           id)))
+            (vm (find-running-vm name)))
+       ((if (string=? action "attach") attach-usb! detach-usb!) vm id)))
+    (_
+     (leave (G_ "usage: guix microvm usb attach|detach NAME \
+VENDOR[:PRODUCT]~%")))))
+
 (define-command (guix-microvm . args)
   (category development)
   (synopsis "run commands in a microvm with a project's packages")
 
   (with-error-handling
-    (let* ((opts command (parse-arguments args))
-           (project (project-directory))
-           (vm-file manifest-file (project-files opts project))
-           (directory (or project (getcwd))))
-      (when (assoc-ref opts 'allow?)
-        (allow-project! project))
-      (when (or vm-file manifest-file)
-        (ensure-allowed project))
-      (when (and (contains-home? directory (canonicalize-path (getenv "HOME")))
-                 (not (assoc-ref opts 'share-home?)))
-        (leave (G_ "not sharing ~a, which contains the home directory, \
-without --share-home~%")
-               directory))
-      (call-with-launcher opts (options->microvm opts vm-file manifest-file)
-        (lambda (launcher)
-          (exit (run-launcher launcher directory command
-                              (launcher-flags opts))))))))
+    (match args
+      (("usb" rest ...) (control-usb rest))
+      (_ (run-in-microvm args)))))

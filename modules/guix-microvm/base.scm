@@ -149,6 +149,13 @@
                   "-t" "ed25519" "-N" ""
                   "-f" "/etc/ssh/ssh_host_ed25519_key")))))
 
+;; For FIDO keys among the USB devices of the VM.
+(define (guest-udev-rules config)
+  (list (udev-rule "90-guix-microvm.rules"
+                   (format #f "SUBSYSTEM==\"hidraw\", MODE=\"0660\", \
+GROUP=\"~a\"~%"
+                           (microvm-guest-user config)))))
+
 (define (guest-accounts config)
   (match-record config <microvm-guest-configuration> (user uid gid)
     (list (user-group
@@ -192,6 +199,7 @@ fi
            (service-extension etc-service-type
                               (const `(("profile.d/guix-microvm-profile.sh"
                                         ,project-profile))))
+           (service-extension udev-service-type guest-udev-rules)
            (service-extension session-environment-service-type
                               (lambda (config)
                                 `(("XDG_RUNTIME_DIR"
