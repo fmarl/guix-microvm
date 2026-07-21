@@ -1,0 +1,484 @@
+;; Unit tests of the launcher and the extension, without a VM.
+
+(use-modules (guix-microvm build microvm)
+             (guix-microvm base)
+             (guix-microvm microvm)
+             (gnu services)
+             ((gnu system) #:select (operating-system))
+             ((guix build utils) #:select (mkdir-p delete-file-recursively))
+             ((guix diagnostics)
+              #:select (guix-warning-port formatted-message?))
+             (ice-9 match)
+             (ice-9 popen)
+             (ice-9 textual-ports)
+             (srfi srfi-1)
+             (srfi srfi-26)
+             (srfi srfi-34)
+             (srfi srfi-64)
+             (srfi srfi-71))
+
+(define-syntax-rule (define-private module name ...)
+  (begin (define name (@@ module name)) ...))
+
+(define-private (guix-microvm build microvm)
+  parse-arguments vm-files git-identity read-secrets environment-with
+  shell-quote remote-command serial-options id-map-options virtiofs-device
+  qemu-arguments open-log call-with-temporary-directory call-with-process
+  call-with-servers server share vm-shares wayland-forwarding
+  vm-kernel-arguments existing-directory launcher-error?
+  launcher-error-status call-with-launcher-errors fail share-tag
+  share-directory share-options share-wrapper server-program server-socket)
+
+(define-private (guix-microvm microvm)
+  passt-port-options passt-network-options guest-configuration)
+
+(define-private (guix extensions microvm)
+  string->port launcher-flags project-directory project-digest
+  allowed-project allowed-projects allow-project! project-allowed?
+  project-files)
+
+(define (exit-code thunk)
+  "Return the status THUNK exits with, or that of the launcher error it
+raises, or #f if it returns."
+  (catch 'quit
+    (lambda ()
+      (guard (error ((launcher-error? error)
+                     (launcher-error-status error)))
+        (thunk)
+        #f))
+    (lambda (key status) status)))
+
+(define (quietly thunk)
+  "Call THUNK with errors and warnings sent to /dev/null."
+  (call-with-port (open-file "/dev/null" "w")
+    (lambda (null)
+      (parameterize ((guix-warning-port null))
+        (with-error-to-port null thunk)))))
+
+(define (with-environment variables thunk)
+  "Call THUNK with VARIABLES, an alist of names and values or #f, set."
+  (let ((old (map (match-lambda ((name . _) (cons name (getenv name))))
+                  variables)))
+    (define (set-all! alist)
+      (for-each (match-lambda
+                  ((name . #f) (unsetenv name))
+                  ((name . value) (setenv name value)))
+                alist))
+    (dynamic-wind
+      (lambda () (set-all! variables))
+      thunk
+      (lambda () (set-all! old)))))
+
+(define (sh-output script)
+  "Return the output of the shell SCRIPT."
+  (let* ((port (open-pipe* OPEN_READ "sh" "-c" script))
+         (output (get-string-all port)))
+    (close-pipe port)
+    output))
+
+(define (server-script file)
+  "Return the arguments of sh to write its PID to FILE.pid, create FILE and
+sleep."
+  `("-c" ,(string-append "echo $$ > " file ".pid; touch " file
+                         "; exec sleep 100")))
+
+(define (stopped? pid-file)
+  "Return true if the process whose PID is in PID-FILE no longer exists."
+  (let ((pid (string->number
+              (string-trim-right (call-with-input-file pid-file
+                                   get-string-all)))))
+    (not (false-if-exception (begin (kill pid 0) #t)))))
+
+(define (failure-reporter)
+  "Return a test runner that reports failures only."
+  (let ((runner (test-runner-null)))
+    (test-runner-on-test-end! runner
+      (lambda (runner)
+        (when (memq (test-result-kind runner) '(fail xpass))
+          (format #t "FAIL: ~a~%~{  ~s~%~}"
+                  (test-runner-test-name runner)
+                  (test-result-alist runner)))))
+    runner))
+
+(test-runner-current (failure-reporter))
+(test-begin "unit")
+
+(define tmp
+  (mkdtemp (string-append (or (getenv "TMPDIR") "/tmp")
+                          "/guix-microvm-test.XXXXXX")))
+
+;;; Command line
+
+(test-equal "parse-arguments, nothing"
+  '(() "." ())
+  (call-with-values (lambda () (parse-arguments '())) list))
+
+(test-equal "parse-arguments, flags, directory and command"
+  '(("--stateless" "--share-home") "/p" ("make" "--" "x"))
+  (call-with-values
+      (lambda ()
+        (parse-arguments
+         '("--stateless" "--share-home" "/p" "--" "make" "--" "x")))
+    list))
+
+(test-equal "parse-arguments, command only"
+  '(() "." ("ls"))
+  (call-with-values (lambda () (parse-arguments '("--" "ls"))) list))
+
+(test-equal "parse-arguments, usage error"
+  2
+  (exit-code (lambda ()
+               (parse-arguments '("a" "b")))))
+
+(test-equal "existing-directory"
+  (list (canonicalize-path tmp) 1)
+  (list (existing-directory (string-append tmp "/."))
+        (exit-code (lambda ()
+                     (existing-directory (string-append tmp "/none"))))))
+
+(test-assert "contains-home?"
+  (and (contains-home? "/" "/home/u")
+       (contains-home? "/home" "/home/u")
+       (contains-home? "/home/u" "/home/u")
+       (not (contains-home? "/home/u/src" "/home/u"))
+       (not (contains-home? "/home/us" "/home/u"))
+       (not (contains-home? "/home/u" "/home/us"))))
+
+;;; Files and environment
+
+(test-equal "vm-files"
+  '("/d/vm/%2Fp%20q" "/d/vm/%2Fp%20q.log" "/d/ssh/id_ed25519")
+  (call-with-values (lambda () (vm-files "/d" "/t" "vm" "/p q" #f))
+    list))
+
+(test-equal "vm-files, stateless"
+  '("/t/home" "/t/console.log" "/t/id_ed25519")
+  (call-with-values (lambda () (vm-files "/d" "/t" "vm" "/p" #t)) list))
+
+(test-equal "git-identity, from the environment"
+  '(("GIT_AUTHOR_NAME" . "A") ("GIT_AUTHOR_EMAIL" . "a@x")
+    ("GIT_COMMITTER_NAME" . "C") ("GIT_COMMITTER_EMAIL" . "a@x"))
+  (with-environment '(("GIT_AUTHOR_NAME" . "A")
+                      ("GIT_AUTHOR_EMAIL" . "a@x")
+                      ("GIT_COMMITTER_NAME" . "C")
+                      ("GIT_COMMITTER_EMAIL" . #f))
+    (lambda ()
+      (git-identity "/nonexistent/git" tmp))))
+
+(test-equal "git-identity, from the Git configuration"
+  '(("GIT_AUTHOR_NAME" . "B") ("GIT_AUTHOR_EMAIL" . "b@x")
+    ("GIT_COMMITTER_NAME" . "B") ("GIT_COMMITTER_EMAIL" . "b@x"))
+  (let ((repository (string-append tmp "/repo")))
+    (mkdir repository)
+    (with-environment `(("GIT_AUTHOR_NAME" . #f)
+                        ("GIT_AUTHOR_EMAIL" . #f)
+                        ("GIT_COMMITTER_NAME" . #f)
+                        ("GIT_COMMITTER_EMAIL" . #f)
+                        ("GIT_CONFIG_GLOBAL" . "/dev/null")
+                        ("GIT_CONFIG_NOSYSTEM" . "1"))
+      (lambda ()
+        (sh-output (string-append "cd " repository " && git init -q"
+                                  " && git config user.name B"
+                                  " && git config user.email b@x"))
+        (git-identity "git" repository)))))
+
+(test-equal "read-secrets"
+  '(("A" . "secret"))
+  (let ((directory (string-append tmp "/secrets")))
+    (mkdir directory)
+    (call-with-output-file (string-append directory "/A")
+      (lambda (port)
+        (display "secret\n" port)))
+    (read-secrets directory '("A" "MISSING"))))
+
+(test-equal "environment-with"
+  '("NEW=1" "PATH=/x")
+  (with-environment '(("PATH" . "/usr/bin"))
+    (lambda ()
+      (let ((environment (environment-with '(("NEW" . "1")
+                                             ("PATH" . "/x")))))
+        (filter (lambda (entry)
+                  (or (string-prefix? "NEW=" entry)
+                      (string-prefix? "PATH=" entry)))
+                environment)))))
+
+;;; Shell commands
+
+(test-equal "shell-quote"
+  "it's \"$HOME\" `x` \\"
+  (sh-output (string-append "printf %s "
+                            (shell-quote "it's \"$HOME\" `x` \\"))))
+
+(test-equal "remote-command"
+  "cd /work && 'echo' 'it'\\''s'; echo $? > /s"
+  (remote-command '("echo" "it's") '() "/s"))
+
+(test-equal "remote-command, login shell"
+  "cd /work && \"$SHELL\" -l; echo $? > /s"
+  (remote-command '() '() "/s"))
+
+;; The status file must be written by the shell under WRAPPER.
+(test-equal "remote-command, wrapper"
+  (string-append "sh\n-c\n" (remote-command '("echo" "it's") '() "/s")
+                 "\n")
+  (sh-output (remote-command '("echo" "it's") '("printf" "'%s\\n'")
+                             "/s")))
+
+;;; QEMU and virtiofsd
+
+(test-equal "serial-options"
+  '(("-chardev" "file,id=serial,path=/l,append=on" "-serial"
+     "chardev:serial")
+    ("-serial" "stdio"))
+  (list (serial-options "/l" #f) (serial-options "/l" "stdio")))
+
+(test-equal "id-map-options"
+  '("--translate-uid" "map:1000:0:1" "--translate-gid" "map:100:0:1")
+  (id-map-options 1000 100 0 0))
+
+(test-equal "virtiofs-device"
+  '("-chardev" "socket,id=work,path=/w.sock"
+    "-device" "vhost-user-fs-device,chardev=work,tag=work")
+  (virtiofs-device (share "work" "/w" '() '()) "/w.sock"))
+
+(test-equal "vm-shares"
+  '((("store" "/s" #t ("/mount-store" "/items" "/s"))
+     ("work" "/p" #f ())
+     ("home" "/h" #f ()))
+    (#t ("--readonly" "--translate-uid" "map:1000:0:1"
+         "--translate-gid" "map:100:0:1")))
+  (let ((shares stateless
+                (values
+                 (vm-shares #:directory "/p" #:home "/h" #:stateless? #f
+                            #:uid 1000 #:gid 100 #:store "/s"
+                            #:store-items "/items"
+                            #:mount-store "/mount-store")
+                 (vm-shares #:directory "/p" #:home "/h" #:stateless? #t
+                            #:uid 1000 #:gid 100 #:store "/s"
+                            #:store-items "/items"
+                            #:mount-store "/mount-store"))))
+    (list (map (lambda (share)
+                 (list (share-tag share) (share-directory share)
+                       (and (member "--readonly" (share-options share)) #t)
+                       (share-wrapper share)))
+               shares)
+          (list (equal? (map share-tag shares) (map share-tag stateless))
+                (share-options (second stateless))))))
+
+(test-equal "wayland-forwarding"
+  '((() () ())
+    (("/waypipe" "/h.sock")
+     ("/waypipe" "--socket" "/g.sock" "--no-gpu" "server" "--")
+     ("-o" "ExitOnForwardFailure=yes" "-R" "/g.sock:/h.sock")))
+  (map (lambda (waypipe)
+         (let ((servers wrapper options
+                        (wayland-forwarding waypipe "vm" "/h.sock"
+                                            "/g.sock")))
+           (list (append-map (lambda (server)
+                               (list (server-program server)
+                                     (server-socket server)))
+                             servers)
+                 wrapper options)))
+       '(#f "/waypipe")))
+
+(test-equal "vm-kernel-arguments"
+  '(("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K" "a")
+    ("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K"
+     "guix-microvm.stateless=1" "a"))
+  (list (vm-kernel-arguments "K" #f '("a"))
+        (vm-kernel-arguments "K" #t '("a"))))
+
+(test-assert "qemu-arguments"
+  (let ((arguments (qemu-arguments #:kernel "/k" #:initrd "/i"
+                                   #:kernel-arguments '("a=1" "b")
+                                   #:memory 512 #:cpus 2 #:cid "42"
+                                   #:network "/n.sock"
+                                   #:serial '("-serial" "stdio")
+                                   #:devices '("-device" "d"))))
+    (and (equal? (take (member "-append" arguments) 2)
+                 '("-append" "a=1 b"))
+         (member "-no-reboot" arguments)
+         (equal? (take (member "-m" arguments) 4) '("-m" "512" "-smp" "2"))
+         (member "vhost-vsock-device,guest-cid=42" arguments)
+         (equal? (take-right arguments 2) '("-device" "d")))))
+
+(test-equal "passt-port-options"
+  '(("--tcp-ports" "127.0.0.1/3000")
+    ("--tcp-ports" "127.0.0.1/8080:80"))
+  (list (passt-port-options 3000) (passt-port-options '(8080 . 80))))
+
+(test-equal "passt-network-options"
+  '("--address" "10.0.2.15" "--netmask" "24" "--gateway" "10.0.2.2"
+    "--dns-forward" "10.0.2.3")
+  (let ((guest (guest-configuration %base-vm)))
+    (passt-network-options (microvm-guest-network guest)
+                           (microvm-guest-name-server guest))))
+
+;;; Guest
+
+(test-equal "guest-configuration, as configured"
+  '("dev" 1001 2223)
+  (let ((guest (guest-configuration
+                (operating-system
+                  (inherit %base-vm)
+                  (services
+                   (modify-services %microvm-base-services
+                     (microvm-guest-service-type
+                      config => (microvm-guest-configuration
+                                  (inherit config)
+                                  (user "dev")
+                                  (uid 1001)
+                                  (ssh-port 2223)))))))))
+    (list (microvm-guest-user guest) (microvm-guest-uid guest)
+          (microvm-guest-ssh-port guest))))
+
+(test-assert "guest-configuration, without the service"
+  (guard (error ((formatted-message? error) #t))
+    (guest-configuration (operating-system
+                           (inherit %base-vm)
+                           (services
+                            (remove (lambda (service)
+                                      (eq? (service-kind service)
+                                           microvm-guest-service-type))
+                                    %microvm-base-services))))
+    #f))
+
+;;; Processes
+
+(test-equal "open-log empties the file"
+  "new"
+  (let ((file (string-append tmp "/log")))
+    (call-with-output-file file (cut display "old" <>))
+    (call-with-port (open-log file) (cut display "new" <>))
+    (call-with-input-file file get-string-all)))
+
+(test-assert "call-with-temporary-directory deletes it on exit"
+  (let ((directory #f))
+    (exit-code (lambda ()
+                 (call-with-temporary-directory tmp
+                   (lambda (d)
+                     (set! directory d)
+                     (exit 3)))))
+    (and directory (not (file-exists? directory)))))
+
+(test-equal "wait-for-exit"
+  '(3 143)
+  (list (wait-for-exit (spawn "sh" '("sh" "-c" "exit 3")))
+        (wait-for-exit (spawn "sh" '("sh" "-c" "kill $$")))))
+
+(test-assert "call-with-process stops it"
+  (let ((pid (call-with-process "sleep" '("100") identity)))
+    (not (false-if-exception (begin (kill pid 0) #t)))))
+
+(test-equal "call-with-servers starts them in order and stops them"
+  '(#t #t #t #t)
+  (let* ((a (string-append tmp "/a.sock"))
+         (b (string-append tmp "/b.sock"))
+         (seen '()))
+    (call-with-servers (list (server "sh" (server-script a) a)
+                             (server "sh" (server-script b) b))
+      (lambda ()
+        (set! seen (map file-exists? (list a b)))))
+    (append seen
+            (map (lambda (socket)
+                   (stopped? (string-append socket ".pid")))
+                 (list a b)))))
+
+(test-equal "call-with-servers fails if one exits"
+  1
+  (exit-code (lambda ()
+               (call-with-servers
+                   (list (server "true" '() (string-append tmp
+                                                           "/none.sock")))
+                 (const #t)))))
+
+(test-equal "call-with-launcher-errors reports and returns the status"
+  '(1 "run-vm: no x\n" 7)
+  (let* ((status #f)
+         (output (with-error-to-string
+                  (lambda ()
+                    (set! status
+                          (call-with-launcher-errors
+                           (lambda ()
+                             (fail "no ~a" "x"))))))))
+    (list status output (call-with-launcher-errors (const 7)))))
+
+;;; Extension
+
+(test-equal "string->port"
+  '(3000 (8080 . 80) 1)
+  (list (string->port "3000")
+        (string->port "8080:80")
+        (exit-code (lambda ()
+                     (quietly
+                       (lambda ()
+                         (string->port "x")))))))
+
+(test-equal "allowed-project"
+  '(("/p q" . "abc") #f #f)
+  (map allowed-project '("abc /p q" "" "abc")))
+
+(test-equal "launcher-flags"
+  '(() ("--share-home" "--stateless"))
+  (list (launcher-flags '((vm . "x")))
+        (launcher-flags '((stateless? . #t) (share-home? . #t)))))
+
+(let* ((project (string-append tmp "/project"))
+       (sub (string-append project "/a/b"))
+       (manifest (string-append project "/manifest.scm"))
+       (vm (string-append project "/vm.scm")))
+  (mkdir-p sub)
+  (call-with-output-file manifest (cut display "1" <>))
+
+  (test-equal "project-directory"
+    project
+    (let ((cwd (getcwd)))
+      (dynamic-wind
+        (cut chdir sub)
+        project-directory
+        (cut chdir cwd))))
+
+  (test-equal "project-files"
+    `((#f ,manifest) (,vm ,manifest))
+    (begin
+      (call-with-output-file vm (cut display "v" <>))
+      (map (lambda (opts)
+             (call-with-values (lambda () (project-files opts project))
+               list))
+           '(((vm . "claude-vm")) ()))))
+
+  (with-environment `(("XDG_CONFIG_HOME" . ,(string-append tmp "/config")))
+    (lambda ()
+      (test-equal "allow-project!"
+        '(#f #t #f #t)
+        (let* ((before (project-allowed? project))
+               (_ (allow-project! project))
+               (allowed (project-allowed? project)))
+          (call-with-output-file manifest (cut display "2" <>))
+          (let ((changed (project-allowed? project)))
+            (allow-project! project)
+            (list before allowed changed (project-allowed? project)))))
+
+      (test-equal "allow-project! keeps the other projects"
+        (sort (list project "/other") string<?)
+        (begin
+          (call-with-output-file
+              (string-append tmp "/config/guix/microvm-allowed")
+            (lambda (port)
+              (format port "~a ~a~%" (project-digest project) project)
+              (format port "digest /other~%")))
+          (allow-project! project)
+          (sort (map car (allowed-projects)) string<?)))
+
+      (test-assert "project-digest changes when a file disappears"
+        (let ((digest (project-digest project)))
+          (delete-file vm)
+          (not (equal? digest (project-digest project))))))))
+
+(delete-file-recursively tmp)
+
+(define failures (test-runner-fail-count (test-runner-current)))
+(format #t "~a passed, ~a failed~%"
+        (test-runner-pass-count (test-runner-current)) failures)
+(test-end "unit")
+(exit (zero? failures))

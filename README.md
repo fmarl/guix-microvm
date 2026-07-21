@@ -101,6 +101,7 @@ overlay in the VM's memory; don't change the project on the host meanwhile.
 
 ## Development
 ```
-make check     # evaluate all VMs
+make check     # evaluate all VMs, run the unit tests
+make check-vm  # boot VMs and test the launcher (needs KVM)
 make update    # update channels-lock.scm
 ```
