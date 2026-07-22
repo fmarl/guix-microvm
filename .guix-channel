@@ -1,3 +1,8 @@
 (channel
  (version 0)
- (directory "modules"))
+ (directory "modules")
+ (dependencies
+  (channel
+   (name sagittarius)
+   (url "https://codeberg.org/fmarl/sagittarius")
+   (branch "main"))))
