@@ -7,6 +7,8 @@ project's `manifest.scm`, nothing else of the host.
 - x86_64 with `/dev/kvm` and `/dev/vhost-vsock` (modules `kvm_intel` or
   `kvm_amd`, and `vhost_vsock`)
 - unprivileged user namespaces
+- Landlock, which confines QEMU (`qemu-locked` from the sagittarius
+  channel)
 - a Wayland session for graphical VMs
 
 ## Installation
