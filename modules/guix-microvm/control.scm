@@ -33,7 +33,7 @@
   (usb?       running-vm-usb?)
   (qmp-socket running-vm-qmp-socket))
 
-(define (alive? pid)
+(define (process-exists? pid)
   (false-if-exception (begin (kill pid 0) #t)))
 
 (define (directory->running-vm directory)
@@ -41,7 +41,7 @@
   (match (false-if-exception
           (call-with-input-file (vm-info-file directory) read))
     ((? list? info)
-     (and (alive? (assq-ref info 'pid))
+     (and (process-exists? (assq-ref info 'pid))
           (running-vm (assq-ref info 'name)
                       (assq-ref info 'directory)
                       (assq-ref info 'usb?)
