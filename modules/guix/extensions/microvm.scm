@@ -108,8 +108,8 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
               ((_ command ...) command)))))
 
 (define (predefined-microvms)
-  "Return the names and microvms the (guix-microvm vms ...) modules export, as
-an alist."
+  "Return the microvms the (guix-microvm vms ...) modules export, as an alist
+by name."
   (fold-module-public-variables*
    (lambda (module symbol variable result)
      (let ((value (variable-ref variable)))
@@ -128,7 +128,7 @@ an alist."
                                  ", ")))))
 
 (define (project-directory)
-  "Return the closest directory, starting from the current one, that contains
+  "Return the nearest directory, from the current one up, that contains
 vm.scm or manifest.scm, or #f."
   (let loop ((directory (getcwd)))
     (cond ((any (lambda (file)
@@ -139,8 +139,6 @@ vm.scm or manifest.scm, or #f."
           (else (loop (dirname directory))))))
 
 (define* (allowed-file #:key ensure?)
-  "Return the file listing the allowed projects, creating its directory if
-ENSURE?."
   (string-append (config-directory #:ensure? ensure?) "/microvm-allowed"))
 
 (define (project-digest project)
@@ -161,15 +159,14 @@ either changes, appears or disappears."
       "\n")))))
 
 (define (allowed-project line)
-  "Return the directory and digest on LINE of the allowed file, as a pair, or
-#f."
+  "Parse LINE of the allowed file into a directory and digest pair, or #f."
   (match (string-index line #\space)
     (#f #f)
     (index (cons (string-drop line (+ index 1))
                  (string-take line index)))))
 
 (define (allowed-projects)
-  "Return the allowed projects, as an alist of directories and digests."
+  "Return the allowed projects as an alist of directories and digests."
   (catch 'system-error
     (lambda ()
       (filter-map allowed-project
@@ -251,23 +248,21 @@ Review them, then run @command{guix microvm --allow}."))
                                           opts)))))))
 
 (define (built-launcher vm)
-  "Return, as a monadic value, the file name of the launcher of VM, once
-built."
+  "Build VM's launcher and return its file name, in the store monad."
   (mlet %store-monad ((drv (lower-object vm)))
     (mbegin %store-monad
       (built-derivations (list drv))
       (return (derivation->output-path drv)))))
 
 (define (launcher-flags opts)
-  "Return the flags of the launcher OPTS set."
   (filter-map (match-lambda
                 ((key . flag) (and (assoc-ref opts key) flag)))
               '((share-home? . "--share-home")
                 (stateless? . "--stateless"))))
 
 (define (call-with-launcher opts vm proc)
-  "Build the launcher of VM as OPTS say and, unless they ask for a dry run,
-call PROC with its file name."
+  "Build VM's launcher with the build options in OPTS and call PROC with its
+file name, unless OPTS ask for a dry run."
   (with-store store
     (set-build-options-from-command-line store opts)
     (with-build-handler (build-notifier #:use-substitutes?
@@ -287,13 +282,11 @@ call PROC with its file name."
               (proc launcher))))))))
 
 (define (run-launcher launcher directory command flags)
-  "Run LAUNCHER with FLAGS, DIRECTORY and COMMAND, and return its exit
-status."
   (wait-for-exit
    (spawn launcher `(,launcher ,@flags ,directory "--" ,@command))))
 
 (define (run-in-microvm args)
-  "Run the command ARGS specify in the project's microvm, and exit with its
+  "Run the command in ARGS in the project's microvm and exit with its
 status."
   (let* ((opts command (parse-arguments args))
          (project (project-directory))
@@ -314,8 +307,8 @@ without --share-home~%")
                             (launcher-flags opts)))))))
 
 (define (find-running-vm name)
-  "Return the running microvm NAME, the one sharing the current project if
-several run."
+  "Return the running microvm NAME.  If several run, return the one sharing
+the current project."
   (match (filter (compose (cut string=? name <>) running-vm-name)
                  (running-vms))
     (() (leave (G_ "no microvm '~a' is running~%") name))
@@ -329,7 +322,7 @@ several run."
                   name directory))))))
 
 (define (control-usb args)
-  "Attach a host USB device to a running microvm or detach it, as ARGS say."
+  "Attach or detach a host USB device as ARGS say."
   (match args
     (((and action (or "attach" "detach")) name id)
      (let* ((id (or (string->usb-id id)
