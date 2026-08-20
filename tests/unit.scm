@@ -39,12 +39,15 @@
   passt-port-options passt-network-options guest-configuration)
 
 (define-private (guix-microvm control)
-  usb-id-matches? usb-host-arguments running-vm)
+  process-exists? usb-id-matches? usb-host-arguments running-vm)
 
 (define-private (guix extensions microvm)
   string->port launcher-flags project-directory project-digest
   allowed-project allowed-projects allow-project! project-allowed?
   project-files)
+
+(define-syntax-rule (values->list exp)
+  (call-with-values (lambda () exp) list))
 
 (define (exit-code thunk)
   "Return the status THUNK exits with or raises as a launcher error, or #f
@@ -77,6 +80,10 @@ if it returns."
       thunk
       (lambda () (set-all! old)))))
 
+(define (write-file file content)
+  (mkdir-p (dirname file))
+  (call-with-output-file file (cut display content <>)))
+
 (define (sh-output script)
   (let* ((port (open-pipe* OPEN_READ "sh" "-c" script))
          (output (get-string-all port)))
@@ -90,10 +97,7 @@ sleep."
                          "; exec sleep 100")))
 
 (define (stopped? pid-file)
-  (let ((pid (string->number
-              (string-trim-right (call-with-input-file pid-file
-                                   get-string-all)))))
-    (not (false-if-exception (begin (kill pid 0) #t)))))
+  (not (process-exists? (call-with-input-file pid-file read))))
 
 (define (failure-reporter)
   (let ((runner (test-runner-null)))
@@ -116,19 +120,17 @@ sleep."
 
 (test-equal "parse-arguments, nothing"
   '(() "." ())
-  (call-with-values (lambda () (parse-arguments '())) list))
+  (values->list (parse-arguments '())))
 
 (test-equal "parse-arguments, flags, directory and command"
   '(("--stateless" "--share-home") "/p" ("make" "--" "x"))
-  (call-with-values
-      (lambda ()
-        (parse-arguments
-         '("--stateless" "--share-home" "/p" "--" "make" "--" "x")))
-    list))
+  (values->list
+   (parse-arguments
+    '("--stateless" "--share-home" "/p" "--" "make" "--" "x"))))
 
 (test-equal "parse-arguments, command only"
   '(() "." ("ls"))
-  (call-with-values (lambda () (parse-arguments '("--" "ls"))) list))
+  (values->list (parse-arguments '("--" "ls"))))
 
 (test-equal "parse-arguments, usage error"
   2
@@ -153,12 +155,11 @@ sleep."
 
 (test-equal "vm-files"
   '("/d/vm/%2Fp%20q" "/d/vm/%2Fp%20q.log" "/d/ssh/id_ed25519")
-  (call-with-values (lambda () (vm-files "/d" "/t" "vm" "/p q" #f))
-    list))
+  (values->list (vm-files "/d" "/t" "vm" "/p q" #f)))
 
 (test-equal "vm-files, stateless"
   '("/t/home" "/t/console.log" "/t/id_ed25519")
-  (call-with-values (lambda () (vm-files "/d" "/t" "vm" "/p" #t)) list))
+  (values->list (vm-files "/d" "/t" "vm" "/p" #t)))
 
 (test-equal "git-identity, from the environment"
   '(("GIT_AUTHOR_NAME" . "A") ("GIT_AUTHOR_EMAIL" . "a@x")
@@ -190,10 +191,7 @@ sleep."
 (test-equal "read-secrets"
   '(("A" . "secret"))
   (let ((directory (string-append tmp "/secrets")))
-    (mkdir directory)
-    (call-with-output-file (string-append directory "/A")
-      (lambda (port)
-        (display "secret\n" port)))
+    (write-file (string-append directory "/A") "secret\n")
     (read-secrets directory '("A" "MISSING"))))
 
 (test-equal "environment-with"
@@ -366,7 +364,7 @@ sleep."
 (test-equal "open-log empties the file"
   "new"
   (let ((file (string-append tmp "/log")))
-    (call-with-output-file file (cut display "old" <>))
+    (write-file file "old")
     (call-with-port (open-log file) (cut display "new" <>))
     (call-with-input-file file get-string-all)))
 
@@ -385,8 +383,7 @@ sleep."
         (wait-for-exit (spawn "sh" '("sh" "-c" "kill $$")))))
 
 (test-assert "call-with-process stops it"
-  (let ((pid (call-with-process "sleep" '("100") identity)))
-    (not (false-if-exception (begin (kill pid 0) #t)))))
+  (not (process-exists? (call-with-process "sleep" '("100") identity))))
 
 (test-equal "call-with-servers starts them in order and stops them"
   '(#t #t #t #t)
@@ -422,10 +419,6 @@ sleep."
     (list status output (call-with-launcher-errors (const 7)))))
 
 ;;; Control
-
-(define (write-file file content)
-  (mkdir-p (dirname file))
-  (call-with-output-file file (cut display content <>)))
 
 (define (fake-qmp-server file)
   "Serve QMP at FILE to one client.  Return the serving thread; joining it
@@ -568,7 +561,7 @@ gives the commands received.  Each reply follows an event; the command
        (manifest (string-append project "/manifest.scm"))
        (vm (string-append project "/vm.scm")))
   (mkdir-p sub)
-  (call-with-output-file manifest (cut display "1" <>))
+  (write-file manifest "1")
 
   (test-equal "project-directory"
     project
@@ -581,10 +574,9 @@ gives the commands received.  Each reply follows an event; the command
   (test-equal "project-files"
     `((#f ,manifest) (,vm ,manifest))
     (begin
-      (call-with-output-file vm (cut display "v" <>))
+      (write-file vm "v")
       (map (lambda (opts)
-             (call-with-values (lambda () (project-files opts project))
-               list))
+             (values->list (project-files opts project)))
            '(((vm . "claude-vm")) ()))))
 
   (with-environment `(("XDG_CONFIG_HOME" . ,(string-append tmp "/config")))
@@ -594,7 +586,7 @@ gives the commands received.  Each reply follows an event; the command
         (let* ((before (project-allowed? project))
                (_ (allow-project! project))
                (allowed (project-allowed? project)))
-          (call-with-output-file manifest (cut display "2" <>))
+          (write-file manifest "2")
           (let ((changed (project-allowed? project)))
             (allow-project! project)
             (list before allowed changed (project-allowed? project)))))
@@ -602,11 +594,9 @@ gives the commands received.  Each reply follows an event; the command
       (test-equal "allow-project! keeps the other projects"
         (sort (list project "/other") string<?)
         (begin
-          (call-with-output-file
-              (string-append tmp "/config/guix/microvm-allowed")
-            (lambda (port)
-              (format port "~a ~a~%" (project-digest project) project)
-              (format port "digest /other~%")))
+          (write-file (string-append tmp "/config/guix/microvm-allowed")
+                      (format #f "~a ~a~%digest /other~%"
+                              (project-digest project) project))
           (allow-project! project)
           (sort (map car (allowed-projects)) string<?)))
 
