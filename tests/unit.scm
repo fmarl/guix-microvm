@@ -83,6 +83,15 @@ if it returns."
       thunk
       (lambda () (set-all! old)))))
 
+(define (error-message thunk)
+  "Return the message of the error THUNK raises, or #f."
+  (guard (error ((formatted-message? error)
+                 (string-trim-right
+                  (apply format #f (formatted-message-string error)
+                         (formatted-message-arguments error)))))
+    (thunk)
+    #f))
+
 (define (write-file file content)
   (mkdir-p (dirname file))
   (call-with-output-file file (cut display content <>)))
@@ -363,6 +372,25 @@ sleep."
                                     %microvm-base-services))))
     #f))
 
+(test-equal "microvm, invalid fields"
+  '("ports: expected a list of PORT or (HOST . GUEST), got (0)"
+    "ports: expected a list of PORT or (HOST . GUEST), got ((80 . \"x\"))"
+    "secrets: expected a list of variable names, got \"TOKEN\""
+    "memory-size: expected a positive integer, got 0"
+    #f)
+  (map error-message
+       (list (lambda () (microvm (operating-system %base-vm) (ports '(0))))
+             (lambda ()
+               (microvm (operating-system %base-vm) (ports '((80 . "x")))))
+             (lambda ()
+               (microvm (operating-system %base-vm) (secrets "TOKEN")))
+             (lambda ()
+               (microvm (operating-system %base-vm) (memory-size 0)))
+             (lambda ()
+               (microvm (operating-system %base-vm)
+                 (ports '(3000 (8080 . 80)))
+                 (secrets '("TOKEN")))))))
+
 (test-equal "microvm-guest-configuration, invalid fields"
   '(#t #t #t #f)
   (map (lambda (thunk)
@@ -471,14 +499,6 @@ gives the commands received.  Each reply follows an event; the command
                            `(("return" . (("answer" . ,command))))))
                  (loop (cons command commands))))))))))))
 
-(define (error-message thunk)
-  "Return the message of the error THUNK raises, or #f."
-  (guard (error ((formatted-message? error)
-                 (string-trim-right
-                  (apply format #f (formatted-message-string error)
-                         (formatted-message-arguments error)))))
-    (thunk)
-    #f))
 
 (test-equal "string->usb-id"
   '((#x1050 . #f) (#x1050 . #x0407) #f #f)
