@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
+
 GUIX := guix time-machine -C $(CURDIR)/channels-lock.scm --
 VMS := $(basename $(notdir $(wildcard modules/guix-microvm/vms/*.scm)))
 
