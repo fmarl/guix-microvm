@@ -8,10 +8,9 @@
   #:use-module ((guix licenses) #:prefix license:)
   #:use-module (gnu packages admin)
   #:use-module (gnu packages linux)
-  #:use-module (gnu packages pkg-config)
-  #:export (virtiofsd))
+  #:use-module (gnu packages pkg-config))
 
-(define virtiofsd
+(define-public virtiofsd
   (package
     (name "virtiofsd")
     (version "1.14.0")
