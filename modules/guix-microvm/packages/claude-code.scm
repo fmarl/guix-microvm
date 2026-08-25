@@ -29,7 +29,8 @@
       ;; passed explicitly by the wrapper.
       #:strip-binaries? #f
       #:validate-runpath? #f
-      #:install-plan #~'(("claude" "libexec/claude-code/"))
+      #:install-plan
+      #~'(("claude" "libexec/claude-code/"))
       #:phases
       #~(modify-phases %standard-phases
           (add-after 'install 'install-wrapper
@@ -39,12 +40,15 @@
                 (mkdir-p (dirname wrapper))
                 (call-with-output-file wrapper
                   (lambda (port)
-                    (format port "#!~a
+                    (format port
+                     "#!~a
 export DISABLE_AUTOUPDATER=1
 exec ~a/ld-linux-x86-64.so.2 --library-path ~a \\
   ~a/libexec/claude-code/claude \"$@\"~%"
-                            #$(file-append bash-minimal "/bin/sh")
-                            libc libc #$output)))
+                     #$(file-append bash-minimal "/bin/sh")
+                     libc
+                     libc
+                     #$output)))
                 (chmod wrapper #o755)))))))
     (inputs (list bash-minimal glibc))
     (supported-systems '("x86_64-linux"))
@@ -52,5 +56,6 @@ exec ~a/ld-linux-x86-64.so.2 --library-path ~a \\
     (synopsis "Agentic coding tool for the terminal")
     (description "Claude Code is Anthropic's agentic coding assistant.  It
 reads and edits code and runs commands in the terminal.")
-    (license ((@@ (guix licenses) license) "Nonfree" "file://LICENSE.md"
+    (license ((@@ (guix licenses) license)
+              "Nonfree" "file://LICENSE.md"
               "Anthropic Commercial Terms of Service"))))

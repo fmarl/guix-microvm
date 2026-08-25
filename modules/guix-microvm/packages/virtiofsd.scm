@@ -23,12 +23,12 @@
         (base32 "1haw4h0f9mgfsyf5axsyzislwaxyskk1d0jwjhjnx0gjkk6aqlbh"))))
     (build-system cargo-build-system)
     (arguments
-     (list #:install-source? #f))
+     (list
+      #:install-source? #f))
     (native-inputs (list pkg-config))
     (inputs (cons* libcap-ng libseccomp
-                   (cargo-inputs
-                    'virtiofsd
-                    #:module '(guix-microvm packages rust-crates))))
+                   (cargo-inputs 'virtiofsd
+                                 #:module '(guix-microvm packages rust-crates))))
     (home-page "https://gitlab.com/virtio-fs/virtiofsd")
     (synopsis "Vhost-user virtio-fs device backend")
     (description "virtiofsd is a vhost-user backend for virtio-fs, which
