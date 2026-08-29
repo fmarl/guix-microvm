@@ -17,7 +17,6 @@ check:
 	$(GUIX) repl -- tests/unit.scm
 	$(MAKE) lint
 
-# 'guix lint' and 'guix style' exit with 0 on findings, hence the grep.
 lint:
 	! $(GUIX) lint -L $(CURDIR)/modules --no-network $(PACKAGES) 2>&1 \
 	    | grep -v '^;;;' | grep .
