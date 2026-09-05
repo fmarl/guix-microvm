@@ -1,6 +1,7 @@
 (channel
  (version 0)
  (directory "modules")
+ (news-file "news.scm")
  (dependencies
   (channel
    (name sagittarius)
