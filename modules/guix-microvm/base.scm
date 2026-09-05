@@ -225,9 +225,9 @@ fi
                               guest-networks)
            (service-extension etc-service-type
                               (const `(("profile.d/guix-microvm-profile.sh"
-                                        ,project-profile)
-                                       ("bashrc.d/guix-microvm-prompt.sh"
-                                        ,microvm-prompt))))
+                                        ,project-profile))))
+           (service-extension etc-bashrc-d-service-type
+                              (const (list microvm-prompt)))
            (service-extension udev-service-type guest-udev-rules)
            (service-extension session-environment-service-type
                               (lambda (config)
