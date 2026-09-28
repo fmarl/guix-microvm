@@ -223,9 +223,8 @@ fi
            (service-extension account-service-type guest-accounts)
            (service-extension static-networking-service-type
                               guest-networks)
-           (service-extension etc-service-type
-                              (const `(("profile.d/guix-microvm-profile.sh"
-                                        ,project-profile))))
+           (service-extension etc-profile-d-service-type
+                              (const (list project-profile)))
            (service-extension etc-bashrc-d-service-type
                               (const (list microvm-prompt)))
            (service-extension udev-service-type guest-udev-rules)
