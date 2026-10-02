@@ -23,8 +23,10 @@
                             procps)
                       %base-packages))
     (services
-     (cons (simple-service 'claude-environment session-environment-service-type
-                           '(("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" . "1")))
+     (cons (simple-service 'claude-environment
+                           session-environment-service-type
+                           '(("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+                              . "1")))
            (operating-system-user-services %base-vm)))))
 
 ;; CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token', logs in all projects.
