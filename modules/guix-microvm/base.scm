@@ -88,7 +88,12 @@
         (for-each (lambda (directory)
                     (mkdir-p directory)
                     (chmod directory #o1777))
-                  '("/tmp" "/var/tmp" "/var/lock")))))
+                  '("/tmp" "/var/tmp" "/var/lock"))
+        (let ((runtime #$(string-append "/run/user/"
+                                        (number->string %vm-uid))))
+          (mkdir-p runtime)
+          (chown runtime #$%vm-uid #$%vm-gid)
+          (chmod runtime #o700)))))
 
 ;; One host key, quick to generate on each boot, rather than one of each type:
 ;; the launcher does not check it anyway.
@@ -121,6 +126,10 @@ fi
          (simple-service 'project-profile etc-service-type
                          `(("profile.d/guix-microvm-profile.sh"
                             ,project-profile)))
+         (simple-service 'runtime-directory session-environment-service-type
+                         `(("XDG_RUNTIME_DIR"
+                            . ,(string-append "/run/user/"
+                                              (number->string %vm-uid)))))
          (service openssh-service-type
                   (openssh-configuration
                     (password-authentication? #f)
@@ -128,10 +137,10 @@ fi
                     (challenge-response-authentication? #f)
                     (x11-forwarding? #f)
                     (allow-agent-forwarding? #f)
-                    (allow-tcp-forwarding? #f)
+                    ;; For the Wayland socket.  The launcher, the only client,
+                    ;; picks the forwards and the variables it sends.
+                    (allow-tcp-forwarding? #t)
                     (generate-host-keys? #f)
-                    ;; The launcher, the only client, picks the variables it
-                    ;; sends.
                     (extra-content "\
 HostKey /etc/ssh/ssh_host_ed25519_key
 AcceptEnv *\n")))
