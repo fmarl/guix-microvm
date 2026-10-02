@@ -67,7 +67,7 @@ The VM, if not the default one:
 ```
 
 Fields: `operating-system` (inheriting `%base-vm`), `command`, `wayland?`,
-`stateless?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
+`stateless?`, `usb?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
 
 The system needs `microvm-guest-service-type`, part of
 `%microvm-base-services`.  The launcher reads its configuration: `user`,
@@ -88,6 +88,24 @@ Log in once for all projects:
 guix microvm --vm=claude-vm -- claude setup-token
 mkdir -p ~/.local/share/guix-microvm/claude/secrets
 echo TOKEN > ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
+```
+
+### USB devices
+A VM with `usb?`, like `librewolf-vm`, takes USB devices of the host while it
+runs, by their hexadecimal vendor and product IDs, which `lsusb` shows.  The
+host lacks a device until it is detached or the VM exits:
+
+```
+guix microvm usb attach librewolf 1050   # a YubiKey, for WebAuthn
+guix microvm usb detach librewolf 1050
+```
+
+QEMU opens the device as you, which a udev rule on the host allows:
+
+```scheme
+(udev-rules-service 'yubikey-usb
+                    (udev-rule "90-yubikey-usb.rules" "\
+SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1050\", MODE=\"0660\", GROUP=\"plugdev\"\n"))
 ```
 
 ## Files

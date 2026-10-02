@@ -30,6 +30,7 @@
             microvm-manifest
             microvm-ports
             microvm-secrets
+            microvm-usb?
             microvm-memory-size
             microvm-cpu-count))
 
@@ -48,6 +49,8 @@
                     (default '()))
   (secrets          microvm-secrets           ;list of variable names
                     (default '()))
+  (usb?             microvm-usb?              ;Boolean
+                    (default #f))
   (memory-size      microvm-memory-size       ;integer (MiB)
                     (default 4096))
   (cpu-count        microvm-cpu-count         ;integer
@@ -191,6 +194,7 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
             #:network-options
             '#$(microvm-network-options vm guest)
             #:secrets '#$(microvm-secrets vm)
+            #:usb? #$(microvm-usb? vm)
             #:qemu #$(file-append qemu "/bin/qemu-system-x86_64")
             #:virtiofsd #$(file-append virtiofsd "/bin/virtiofsd")
             #:passt #$(file-append passt "/bin/passt")

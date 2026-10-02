@@ -12,6 +12,10 @@
   #:use-module (srfi srfi-71)
   #:use-module (web uri)
   #:export (contains-home?
+            runtime-directory
+            %vm-directory-prefix
+            vm-info-file
+            qmp-socket-file
             wait-for-exit
             mount-store-items
             run-microvm))
@@ -212,10 +216,17 @@ SECRETS-DIRECTORY."
       (usleep 100000)
       (loop))))
 
+(define (runtime-directory)
+  (getenv* "XDG_RUNTIME_DIR" "/tmp"))
+
+;; That of the directories of the running VMs in the runtime directory.
+(define %vm-directory-prefix "guix-microvm.")
+
 (define (call-with-temporary-directory parent proc)
   "Call PROC with a new directory in PARENT, deleted when PROC returns or
 exits."
-  (let ((directory (mkdtemp (string-append parent "/guix-microvm.XXXXXX"))))
+  (let ((directory (mkdtemp (string-append parent "/" %vm-directory-prefix
+                                           "XXXXXX"))))
     (dynamic-wind
       (const #t)
       (cut proc directory)
@@ -255,6 +266,19 @@ them when it returns or exits."
 (define (socket-file directory name)
   ;; In XDG_RUNTIME_DIR: socket file names are limited to 107 bytes.
   (string-append directory "/" name ".sock"))
+
+(define (qmp-socket-file directory)
+  "Return the QMP socket of the VM whose files are in DIRECTORY."
+  (socket-file directory "qmp"))
+
+(define (vm-info-file directory)
+  "Return the file describing the VM whose files are in DIRECTORY, as an
+alist."
+  (string-append directory "/vm"))
+
+(define (write-vm-info directory info)
+  (call-with-output-file (vm-info-file directory)
+    (cut write info <>)))
 
 (define (passt-server passt socket options)
   "Return the server of the network at SOCKET, with the passt OPTIONS."
@@ -412,16 +436,20 @@ SERIAL names another chardev."
     (serial `("-serial" ,serial))))
 
 (define* (qemu-arguments #:key kernel initrd kernel-arguments memory cpus cid
-                         network serial devices)
+                         network serial devices usb? qmp)
   "Return QEMU's arguments to boot KERNEL on a microvm with MEMORY MiB and
-CPUS, the vsock address CID, the NIC served at NETWORK, and DEVICES."
-  `("-M" "microvm,acpi=off,rtc=on,memory-backend=mem"
+CPUS, the vsock address CID, the NIC served at NETWORK, DEVICES and the QMP
+socket QMP.  USB? adds a USB controller, which needs ACPI."
+  `("-M" ,(string-append "microvm,"
+                         (if usb? "acpi=on,usb=on" "acpi=off")
+                         ",rtc=on,memory-backend=mem")
     "-cpu" "host" "-enable-kvm"
     "-m" ,(number->string memory) "-smp" ,(number->string cpus)
     "-object" ,(format #f "memory-backend-memfd,id=mem,size=~aM,share=on"
                        memory)
     "-nodefaults" "-no-user-config" "-no-reboot"
     "-display" "none" "-monitor" "none"
+    "-qmp" ,(string-append "unix:" qmp ",server=on,wait=off")
     ,@serial
     "-kernel" ,kernel "-initrd" ,initrd
     "-append" ,(string-join kernel-arguments)
@@ -551,11 +579,12 @@ in it with SSH-OPTIONS, and return its exit status."
                       memory-size cpu-count user uid gid ssh-port
                       network-options
                       qemu virtiofsd passt waypipe ssh ssh-keygen socat git
-                      unshare mount-store secrets)
+                      unshare mount-store secrets usb?)
   "Run the microvm NAME with the command line ARGS, and return the exit status
 of the command run in it, by default DEFAULT-COMMAND.  With WAYPIPE, Wayland
 clients in the VM show on the host's Wayland display.  STATELESS?, or
---stateless, gives the VM a fresh home and discards its changes to DIR."
+--stateless, gives the VM a fresh home and discards its changes to DIR.  USB?
+gives it a USB controller, for 'guix microvm usb' to attach host devices to."
   (parameterize ((%program-name (string-append "run-" name)))
     (call-with-launcher-errors
      (lambda ()
@@ -573,7 +602,7 @@ clients in the VM show on the host's Wayland display.  STATELESS?, or
               (cid (number->string (getpid))))
          (check-host! directory (member "--share-home" flags) name waypipe)
          (exit-on-signals!)
-         (call-with-temporary-directory (getenv* "XDG_RUNTIME_DIR" "/tmp")
+         (call-with-temporary-directory (runtime-directory)
            (lambda (tmp)
              (let* ((home log key (vm-files data tmp name directory
                                             stateless?))
@@ -601,6 +630,10 @@ clients in the VM show on the host's Wayland display.  STATELESS?, or
                                                  (secrets-directory data name)
                                                  secrets)))))
                (for-each mkdir-p (map share-directory shares))
+               (write-vm-info tmp `((name . ,name)
+                                    (directory . ,directory)
+                                    (usb? . ,usb?)
+                                    (pid . ,(getpid))))
                (call-with-servers
                    `(,(passt-server passt network network-options)
                      ,@wayland-servers
@@ -616,7 +649,9 @@ clients in the VM show on the host's Wayland display.  STATELESS?, or
                         #:memory memory #:cpus cpus #:cid cid
                         #:network network
                         #:serial (serial-options log serial)
-                        #:devices (share-devices shares tmp))
+                        #:devices (share-devices shares tmp)
+                        #:usb? usb?
+                        #:qmp (qmp-socket-file tmp))
                        log
                      (cut boot-and-run spawn-ssh <>
                           (remote-command command wrapper %status-file)
