@@ -6,6 +6,7 @@
   #:use-module (guix profiles)
   #:use-module (guix records)
   #:use-module (gnu packages containers)
+  #:use-module (gnu packages freedesktop)
   #:use-module (gnu packages gnupg)
   #:use-module (gnu packages linux)
   #:use-module (gnu packages networking)
@@ -20,6 +21,8 @@
   #:export (microvm
             microvm?
             microvm-operating-system
+            microvm-command
+            microvm-wayland?
             microvm-manifest
             microvm-ports
             microvm-secrets
@@ -28,11 +31,16 @@
             microvm-qemu
             microvm-virtiofsd
             microvm-passt
+            microvm-waypipe
             microvm-launcher))
 
 (define-record-type* <microvm> microvm make-microvm
   microvm?
   (operating-system microvm-operating-system) ;<operating-system>
+  (command          microvm-command           ;list of strings
+                    (default '()))
+  (wayland?         microvm-wayland?          ;Boolean
+                    (default #f))
   (manifest         microvm-manifest          ;<manifest> | #f
                     (default #f))
   (ports            microvm-ports             ;list of PORT | (HOST . GUEST)
@@ -48,7 +56,9 @@
   (virtiofsd        microvm-virtiofsd         ;<package>
                     (default virtiofsd))
   (passt            microvm-passt             ;<package>
-                    (default passt)))
+                    (default passt))
+  (waypipe          microvm-waypipe           ;<package>
+                    (default waypipe)))
 
 (define (passt-network-options network name-server)
   "Return the options for passt to serve NETWORK, a <static-networking> with
@@ -130,7 +140,8 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
          (root (file-system-device (operating-system-root-file-system os)))
          (project-profile (and=> (microvm-manifest vm)
                                  (lambda (manifest)
-                                   (profile (content manifest))))))
+                                   (profile (content manifest)))))
+         (waypipe (and (microvm-wayland? vm) (microvm-waypipe vm))))
     (program-file
      (string-append "run-" name)
      (with-build-modules
@@ -140,12 +151,14 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
            (run-microvm
             (cdr (command-line))
             #:name #$name
+            #:default-command '#$(microvm-command vm)
             #:kernel #$(operating-system-kernel-file os)
             #:initrd #$(file-append os "/initrd")
             #:kernel-arguments
             (list #$@(operating-system-kernel-arguments os root))
             #:store-items #$(store-items
-                             (filter identity (list os project-profile)))
+                             (filter identity
+                                     (list os project-profile waypipe)))
             #:profile #$project-profile
             #:memory-size #$(microvm-memory-size vm)
             #:cpu-count #$(microvm-cpu-count vm)
@@ -162,6 +175,7 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
             #:virtiofsd #$(file-append (microvm-virtiofsd vm)
                                        "/bin/virtiofsd")
             #:passt #$(file-append (microvm-passt vm) "/bin/passt")
+            #:waypipe #$(and waypipe (file-append waypipe "/bin/waypipe"))
             #:ssh #$(file-append openssh "/bin/ssh")
             #:ssh-keygen #$(file-append openssh "/bin/ssh-keygen")
             #:socat #$(file-append socat "/bin/socat")
