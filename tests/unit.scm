@@ -2,20 +2,26 @@
 
 (use-modules (guix-microvm build microvm)
              (guix-microvm base)
+             (guix-microvm control)
              (guix-microvm microvm)
              (gnu services)
              ((gnu system) #:select (operating-system))
              ((guix build utils) #:select (mkdir-p delete-file-recursively))
              ((guix diagnostics)
-              #:select (guix-warning-port formatted-message?))
+              #:select (guix-warning-port formatted-message?
+                        formatted-message-string
+                        formatted-message-arguments))
              (ice-9 match)
              (ice-9 popen)
+             (ice-9 rdelim)
+             (ice-9 threads)
              (ice-9 textual-ports)
              (srfi srfi-1)
              (srfi srfi-26)
              (srfi srfi-34)
              (srfi srfi-64)
-             (srfi srfi-71))
+             (srfi srfi-71)
+             (json))
 
 (define-syntax-rule (define-private module name ...)
   (begin (define name (@@ module name)) ...))
@@ -31,6 +37,9 @@
 
 (define-private (guix-microvm microvm)
   passt-port-options passt-network-options guest-configuration)
+
+(define-private (guix-microvm control)
+  usb-id-matches? usb-host-arguments running-vm)
 
 (define-private (guix extensions microvm)
   string->port launcher-flags project-directory project-digest
@@ -294,13 +303,26 @@ sleep."
                                    #:memory 512 #:cpus 2 #:cid "42"
                                    #:network "/n.sock"
                                    #:serial '("-serial" "stdio")
-                                   #:devices '("-device" "d"))))
+                                   #:devices '("-device" "d")
+                                   #:qmp "/q.sock")))
     (and (equal? (take (member "-append" arguments) 2)
                  '("-append" "a=1 b"))
          (member "-no-reboot" arguments)
          (equal? (take (member "-m" arguments) 4) '("-m" "512" "-smp" "2"))
          (member "vhost-vsock-device,guest-cid=42" arguments)
+         (member "unix:/q.sock,server=on,wait=off" arguments)
          (equal? (take-right arguments 2) '("-device" "d")))))
+
+(test-equal "qemu-arguments, USB"
+  '("microvm,acpi=off,rtc=on,memory-backend=mem"
+    "microvm,acpi=on,usb=on,rtc=on,memory-backend=mem")
+  (map (lambda (usb?)
+         (second (qemu-arguments #:kernel "/k" #:initrd "/i"
+                                 #:kernel-arguments '() #:memory 512
+                                 #:cpus 2 #:cid "42" #:network "/n.sock"
+                                 #:serial '() #:devices '() #:usb? usb?
+                                 #:qmp "/q.sock")))
+       '(#f #t)))
 
 (test-equal "passt-port-options"
   '(("--tcp-ports" "127.0.0.1/3000")
@@ -402,6 +424,128 @@ sleep."
                            (lambda ()
                              (fail "no ~a" "x"))))))))
     (list status output (call-with-launcher-errors (const 7)))))
+
+;;; Control
+
+(define (write-file file content)
+  (mkdir-p (dirname file))
+  (call-with-output-file file (cut display content <>)))
+
+(define (fake-qmp-server file)
+  "Serve QMP at FILE to one client and return the thread doing it, which
+returns the commands it received.  It sends an event before each reply, and
+an error for the command \"fail\"."
+  (let ((server (socket PF_UNIX SOCK_STREAM 0)))
+    (define (send client message)
+      (write-line (scm->json-string message) client)
+      (force-output client))
+
+    (bind server AF_UNIX file)
+    (listen server 1)
+    (call-with-new-thread
+     (lambda ()
+       (match (accept server)
+         ((client . _)
+          (send client '(("QMP" . (("version" . "test")))))
+          (let loop ((commands '()))
+            (match (read-line client)
+              ((? eof-object?)
+               (close-port client)
+               (close-port server)
+               (reverse commands))
+              (line
+               (let ((command (assoc-ref (json-string->scm line) "execute")))
+                 (send client '(("event" . "TEST")))
+                 (send client
+                       (if (string=? command "fail")
+                           '(("error" . (("class" . "GenericError")
+                                         ("desc" . "failed"))))
+                           `(("return" . (("answer" . ,command))))))
+                 (loop (cons command commands))))))))))))
+
+(define (error-message thunk)
+  "Return the message of the error THUNK raises, or #f."
+  (guard (error ((formatted-message? error)
+                 (string-trim-right
+                  (apply format #f (formatted-message-string error)
+                         (formatted-message-arguments error)))))
+    (thunk)
+    #f))
+
+(test-equal "string->usb-id"
+  '((#x1050 . #f) (#x1050 . #x0407) #f #f)
+  (map string->usb-id '("1050" "1050:0407" "yubi" "1:2:3")))
+
+(test-equal "usb-id-matches?"
+  '(#t #t #f #f)
+  (list (usb-id-matches? '(#x1050 . #f) '(#x1050 . #x0407))
+        (usb-id-matches? '(#x1050 . #x0407) '(#x1050 . #x0407))
+        (usb-id-matches? '(#x1050 . #x0402) '(#x1050 . #x0407))
+        (usb-id-matches? '(#x20a0 . #f) '(#x1050 . #x0407))))
+
+(test-equal "present-usb-devices"
+  '(("/dev/bus/usb/001/009") ())
+  (let ((sysfs (string-append tmp "/sysfs")))
+    (for-each (match-lambda
+                ((name vendor product bus device)
+                 (for-each (lambda (attribute value)
+                             (write-file (string-append sysfs "/" name "/"
+                                                        attribute)
+                                         (string-append value "\n")))
+                           '("idVendor" "idProduct" "busnum" "devnum")
+                           (list vendor product bus device))))
+              '(("1-1" "1050" "0407" "1" "9")
+                ("usb1" "1d6b" "0002" "1" "1")))
+    (write-file (string-append sysfs "/1-1:1.0/bInterfaceClass") "03\n")
+    (list (present-usb-devices '(#x1050 . #f) sysfs)
+          (present-usb-devices '(#x1050 . #x0402) sysfs))))
+
+(test-equal "usb-host-arguments"
+  '((("driver" . "usb-host") ("id" . "usb-1050") ("vendorid" . #x1050))
+    (("driver" . "usb-host") ("id" . "usb-1050-0407") ("vendorid" . #x1050)
+     ("productid" . #x0407)))
+  (list (usb-host-arguments '(#x1050 . #f))
+        (usb-host-arguments '(#x1050 . #x0407))))
+
+(test-equal "running-vms"
+  '(("a" "/p" #t))
+  (let ((runtime (string-append tmp "/runtime"))
+        (exited (spawn "true" '("true"))))
+    (waitpid exited)
+    (for-each (match-lambda
+                ((directory name pid)
+                 (write-file (string-append runtime "/" directory "/vm")
+                             (object->string
+                              `((name . ,name) (directory . "/p")
+                                (usb? . #t) (pid . ,pid))))))
+              `(("guix-microvm.a" "a" ,(getpid))
+                ("guix-microvm.b" "b" ,exited)
+                ("other" "c" ,(getpid))))
+    (mkdir-p (string-append runtime "/guix-microvm.empty"))
+    (map (lambda (vm)
+           (list (running-vm-name vm) (running-vm-directory vm)
+                 (running-vm-usb? vm)))
+         (running-vms runtime))))
+
+(test-equal "call-with-qmp"
+  '((("answer" . "query-status")) "QEMU: failed"
+    ("qmp_capabilities" "query-status" "fail"))
+  (let* ((file (string-append tmp "/qmp.sock"))
+         (server (fake-qmp-server file))
+         (results (call-with-qmp file
+                    (lambda (execute)
+                      (list (execute "query-status")
+                            (error-message (cut execute "fail")))))))
+    (append results (list (join-thread server)))))
+
+(test-equal "attach-usb!, refused"
+  '("vm has no USB controller: its microvm lacks 'usb?'"
+    "no USB device ffff is plugged in")
+  (map (lambda (usb?)
+         (error-message
+          (cut attach-usb! (running-vm "vm" "/p" usb? "/none.sock")
+               '(#xffff . #f))))
+       '(#f #t)))
 
 ;;; Extension
 

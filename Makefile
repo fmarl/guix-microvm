@@ -12,7 +12,7 @@ check:
 	$(GUIX) repl -- tests/unit.scm
 
 check-vm:
-	tests/vm.sh $(GUIX) microvm
+	tests/vm.sh $(GUIX)
 
 update:
 	guix time-machine -C channels.scm -- \
