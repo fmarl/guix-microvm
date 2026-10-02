@@ -20,7 +20,7 @@
      (cons (simple-service 'librewolf-environment
                            session-environment-service-type
                            '(("MOZ_ENABLE_WAYLAND" . "1")))
-           (operating-system-user-services %base-vm)))))
+           %microvm-base-services))))
 
 (define librewolf-vm
   (microvm
