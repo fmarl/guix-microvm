@@ -27,12 +27,7 @@
             microvm-ports
             microvm-secrets
             microvm-memory-size
-            microvm-cpu-count
-            microvm-qemu
-            microvm-virtiofsd
-            microvm-passt
-            microvm-waypipe
-            microvm-launcher))
+            microvm-cpu-count))
 
 (define-record-type* <microvm> microvm make-microvm
   microvm?
@@ -50,15 +45,7 @@
   (memory-size      microvm-memory-size       ;integer (MiB)
                     (default 4096))
   (cpu-count        microvm-cpu-count         ;integer
-                    (default 4))
-  (qemu             microvm-qemu              ;<package>
-                    (default qemu))
-  (virtiofsd        microvm-virtiofsd         ;<package>
-                    (default virtiofsd))
-  (passt            microvm-passt             ;<package>
-                    (default passt))
-  (waypipe          microvm-waypipe           ;<package>
-                    (default waypipe)))
+                    (default 4)))
 
 (define (passt-network-options network name-server)
   "Return the options for passt to serve NETWORK, a <static-networking> with
@@ -118,8 +105,6 @@ host and guest port numbers, from the host's loopback to the guest."
                           #:select? build-module?)
     exp))
 
-;; Run as root of a user namespace: mount store items on a tmpfs, then run a
-;; program.
 (define mount-store
   (program-file
    "mount-store"
@@ -141,7 +126,7 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
          (project-profile (and=> (microvm-manifest vm)
                                  (lambda (manifest)
                                    (profile (content manifest)))))
-         (waypipe (and (microvm-wayland? vm) (microvm-waypipe vm))))
+         (wayland? (microvm-wayland? vm)))
     (program-file
      (string-append "run-" name)
      (with-build-modules
@@ -158,7 +143,8 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
             (list #$@(operating-system-kernel-arguments os root))
             #:store-items #$(store-items
                              (filter identity
-                                     (list os project-profile waypipe)))
+                                     (list os project-profile
+                                           (and wayland? waypipe))))
             #:profile #$project-profile
             #:memory-size #$(microvm-memory-size vm)
             #:cpu-count #$(microvm-cpu-count vm)
@@ -170,12 +156,10 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
             '#$(append (passt-network-options %vm-network %vm-name-server)
                        (append-map passt-port-options (microvm-ports vm)))
             #:secrets '#$(microvm-secrets vm)
-            #:qemu #$(file-append (microvm-qemu vm)
-                                  "/bin/qemu-system-x86_64")
-            #:virtiofsd #$(file-append (microvm-virtiofsd vm)
-                                       "/bin/virtiofsd")
-            #:passt #$(file-append (microvm-passt vm) "/bin/passt")
-            #:waypipe #$(and waypipe (file-append waypipe "/bin/waypipe"))
+            #:qemu #$(file-append qemu "/bin/qemu-system-x86_64")
+            #:virtiofsd #$(file-append virtiofsd "/bin/virtiofsd")
+            #:passt #$(file-append passt "/bin/passt")
+            #:waypipe #$(and wayland? (file-append waypipe "/bin/waypipe"))
             #:ssh #$(file-append openssh "/bin/ssh")
             #:ssh-keygen #$(file-append openssh "/bin/ssh-keygen")
             #:socat #$(file-append socat "/bin/socat")
