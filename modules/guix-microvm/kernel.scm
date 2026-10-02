@@ -1,4 +1,4 @@
-(define-module (guix-vms kernel)
+(define-module (guix-microvm kernel)
   #:use-module (guix gexp)
   #:use-module (guix packages)
   #:use-module (guix utils)

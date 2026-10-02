@@ -1,5 +1,5 @@
 GUIX := guix time-machine -C $(CURDIR)/channels-lock.scm --
-VMS := $(basename $(notdir $(wildcard modules/guix-vms/vms/*.scm)))
+VMS := $(basename $(notdir $(wildcard modules/guix-microvm/vms/*.scm)))
 
 export GUILE_LOAD_PATH := $(CURDIR)/modules$(if $(GUILE_LOAD_PATH),:$(GUILE_LOAD_PATH))
 
@@ -7,7 +7,7 @@ export GUILE_LOAD_PATH := $(CURDIR)/modules$(if $(GUILE_LOAD_PATH),:$(GUILE_LOAD
 
 check:
 	$(GUIX) build --dry-run \
-	    $(foreach vm,$(VMS),-e '(@ (guix-vms vms $(vm)) $(vm)-vm)')
+	    $(foreach vm,$(VMS),-e '(@ (guix-microvm vms $(vm)) $(vm)-vm)')
 	$(GUIX) microvm --help >/dev/null
 
 update:

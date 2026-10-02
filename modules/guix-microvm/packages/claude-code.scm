@@ -1,4 +1,4 @@
-(define-module (guix-vms packages claude-code)
+(define-module (guix-microvm packages claude-code)
   #:use-module (guix gexp)
   #:use-module (guix packages)
   #:use-module (guix download)
