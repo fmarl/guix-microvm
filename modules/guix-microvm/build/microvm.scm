@@ -1,4 +1,4 @@
-(define-module (guix-vms build microvm)
+(define-module (guix-microvm build microvm)
   #:use-module (guix build syscalls)
   #:use-module (guix build utils)
   #:use-module (ice-9 match)
@@ -69,7 +69,8 @@ requires a mount namespace of one's own."
 exists."
   (unless (file-exists? key)
     (mkdir-p (dirname key))
-    (invoke ssh-keygen "-q" "-t" "ed25519" "-N" "" "-C" "guix-vms" "-f" key))
+    (invoke ssh-keygen "-q" "-t" "ed25519" "-N" "" "-C" "guix-microvm"
+            "-f" key))
   (match (string-tokenize
           (call-with-input-file (string-append key ".pub") get-string-all))
     (("ssh-ed25519" blob _ ...) blob)
@@ -128,7 +129,7 @@ DIRECTORY, for those that exist."
 (define (call-with-temporary-directory proc)
   ;; In XDG_RUNTIME_DIR: socket file names are limited to 107 bytes.
   (let ((directory (mkdtemp (string-append (getenv* "XDG_RUNTIME_DIR" "/tmp")
-                                           "/guix-vms.XXXXXX"))))
+                                           "/guix-microvm.XXXXXX"))))
     (dynamic-wind
       (const #t)
       (cut proc directory)
@@ -177,12 +178,12 @@ of the command run in it."
                 '("/dev/kvm" "/dev/vhost-vsock"))
       (set-git-identity! git directory)
       (when profile
-        (setenv "GUIX_VMS_PROFILE" profile))
+        (setenv "GUIX_MICROVM_PROFILE" profile))
 
       (let* ((state (string-append (getenv* "XDG_DATA_HOME"
                                             (string-append (getenv "HOME")
                                                            "/.local/share"))
-                                   "/guix-vms"))
+                                   "/guix-microvm"))
              (home (string-append state "/" name "/" (uri-encode directory)))
              (log (string-append home ".log"))
              (key (string-append state "/ssh/id_ed25519"))
@@ -190,7 +191,7 @@ of the command run in it."
              (memory (number->string (getenv-number "VM_MEMORY" memory-size)))
              ;; Unique among running VMs, as this process' PID.
              (cid (number->string (getpid)))
-             (status-file "/tmp/guix-vms-status"))
+             (status-file "/tmp/guix-microvm-status"))
         (define (ssh-arguments options command)
           `("ssh" "-F" "/dev/null" "-q"
             "-i" ,key "-o" "IdentitiesOnly=yes"
@@ -199,7 +200,7 @@ of the command run in it."
             "-o" "ForwardAgent=no" "-o" "ForwardX11=no"
             "-o" ,(string-join
                    (cons "SendEnv=LANG COLORTERM GIT_AUTHOR_* GIT_COMMITTER_* \
-GUIX_VMS_PROFILE"
+GUIX_MICROVM_PROFILE"
                          secrets))
             "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a"
                           socat cid ssh-port)
@@ -316,8 +317,8 @@ GUIX_VMS_PROFILE"
                          "-kernel" ,kernel "-initrd" ,initrd
                          "-append" ,(string-join
                                      (cons* "console=ttyS0"
-                                            (string-append "guix-vms.ssh-key="
-                                                           key-blob)
+                                            (string-append
+                                             "guix-microvm.ssh-key=" key-blob)
                                             kernel-arguments))
                          "-object" "rng-random,filename=/dev/urandom,id=rng"
                          "-device" "virtio-rng-device,rng=rng"

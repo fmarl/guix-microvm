@@ -1,4 +1,4 @@
-(define-module (guix-vms base)
+(define-module (guix-microvm base)
   #:use-module (srfi srfi-1)
   #:use-module (guix gexp)
   #:use-module (gnu)
@@ -9,7 +9,7 @@
   #:use-module (gnu packages bash)
   #:use-module (gnu packages networking)
   #:use-module (gnu packages ssh)
-  #:use-module (guix-vms kernel)
+  #:use-module (guix-microvm kernel)
   #:export (%vm-user
             %vm-uid
             %vm-gid
@@ -67,7 +67,7 @@
           (modules `((srfi srfi-1) (ice-9 textual-ports)
                      ,@%default-modules))
           (start #~(lambda _
-                     (let ((key #$(kernel-option "guix-vms.ssh-key"))
+                     (let ((key #$(kernel-option "guix-microvm.ssh-key"))
                            (file #$(string-append "/etc/ssh/authorized_keys.d/"
                                                   %vm-user)))
                        (when key
@@ -101,13 +101,13 @@
                 "-N" "" "-f" "/etc/ssh/ssh_host_ed25519_key"))))
 
 (define project-profile
-  (plain-file "guix-vms-profile.sh" "\
-if [ -n \"$GUIX_VMS_PROFILE\" ]
+  (plain-file "guix-microvm-profile.sh" "\
+if [ -n \"$GUIX_MICROVM_PROFILE\" ]
 then
-  GUIX_PROFILE=\"$GUIX_VMS_PROFILE\"
+  GUIX_PROFILE=\"$GUIX_MICROVM_PROFILE\"
   . \"$GUIX_PROFILE/etc/profile\"
   unset GUIX_PROFILE
-  export GUIX_ENVIRONMENT=\"$GUIX_VMS_PROFILE\"
+  export GUIX_ENVIRONMENT=\"$GUIX_MICROVM_PROFILE\"
 fi
 "))
 
@@ -119,7 +119,8 @@ fi
          (simple-service 'network static-networking-service-type
                          (list %vm-network))
          (simple-service 'project-profile etc-service-type
-                         `(("profile.d/guix-vms-profile.sh" ,project-profile)))
+                         `(("profile.d/guix-microvm-profile.sh"
+                            ,project-profile)))
          (service openssh-service-type
                   (openssh-configuration
                     (password-authentication? #f)

@@ -1,4 +1,4 @@
-(define-module (guix-vms microvm)
+(define-module (guix-microvm microvm)
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
   #:use-module (guix gexp)
@@ -15,8 +15,8 @@
   #:use-module (gnu services base)
   #:use-module (gnu system)
   #:use-module (gnu system file-systems)
-  #:use-module (guix-vms packages virtiofsd)
-  #:use-module (guix-vms base)
+  #:use-module (guix-microvm packages virtiofsd)
+  #:use-module (guix-microvm base)
   #:export (microvm
             microvm?
             microvm-operating-system
@@ -99,12 +99,13 @@ host and guest port numbers, from the host's loopback to the guest."
 
 (define (build-module? name)
   (match name
-    (('guix-vms 'build _ ...) #t)
+    (('guix-microvm 'build _ ...) #t)
     (_ (guix-module-name? name))))
 
 (define-syntax-rule (with-build-modules exp)
-  (with-imported-modules (source-module-closure '((guix-vms build microvm))
-                                                #:select? build-module?)
+  (with-imported-modules (source-module-closure
+                          '((guix-microvm build microvm))
+                          #:select? build-module?)
     exp))
 
 ;; Run as root of a user namespace: mount store items on a tmpfs, then run a
@@ -114,7 +115,7 @@ host and guest port numbers, from the host's loopback to the guest."
    "mount-store"
    (with-build-modules
     #~(begin
-        (use-modules (guix-vms build microvm)
+        (use-modules (guix-microvm build microvm)
                      (ice-9 match))
         (match (cdr (command-line))
           ((items root program args ...)
@@ -134,7 +135,7 @@ shares DIR at /work and runs COMMAND in it, as described in README.md."
      (string-append "run-" name)
      (with-build-modules
       #~(begin
-          (use-modules (guix-vms build microvm))
+          (use-modules (guix-microvm build microvm))
           (exit
            (run-microvm
             (cdr (command-line))

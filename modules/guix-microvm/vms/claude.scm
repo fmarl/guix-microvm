@@ -1,8 +1,8 @@
-(define-module (guix-vms vms claude)
+(define-module (guix-microvm vms claude)
   #:use-module (gnu)
-  #:use-module (guix-vms packages claude-code)
-  #:use-module (guix-vms base)
-  #:use-module (guix-vms microvm)
+  #:use-module (guix-microvm packages claude-code)
+  #:use-module (guix-microvm base)
+  #:use-module (guix-microvm microvm)
   #:export (%claude-system
             claude-vm))
 

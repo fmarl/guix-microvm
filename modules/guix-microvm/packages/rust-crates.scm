@@ -1,4 +1,4 @@
-(define-module (guix-vms packages rust-crates)
+(define-module (guix-microvm packages rust-crates)
   #:use-module (guix build-system cargo)
   #:export (lookup-cargo-inputs))
 

@@ -11,9 +11,9 @@
   #:use-module (guix ui)
   #:use-module ((guix utils) #:select (config-directory))
   #:use-module (gnu system)
-  #:use-module (guix-vms base)
-  #:use-module (guix-vms microvm)
-  #:use-module ((guix-vms build microvm) #:select (contains-home?))
+  #:use-module (guix-microvm base)
+  #:use-module (guix-microvm microvm)
+  #:use-module ((guix-microvm build microvm) #:select (contains-home?))
   #:use-module (ice-9 match)
   #:use-module (ice-9 rdelim)
   #:use-module (srfi srfi-1)
@@ -87,8 +87,8 @@ packages of manifest.scm.\n"))
               ((_ command ...) command)))))
 
 (define (predefined-microvms)
-  "Return the names and microvms the (guix-vms vms ...) modules export, as an
-alist."
+  "Return the names and microvms the (guix-microvm vms ...) modules export, as
+an alist."
   (fold-module-public-variables*
    (lambda (module symbol variable result)
      (let ((value (variable-ref variable)))
@@ -96,7 +96,7 @@ alist."
            (alist-cons (symbol->string symbol) value result)
            result)))
    '()
-   (all-modules (map (cut cons <> "guix-vms/vms") %load-path))))
+   (all-modules (map (cut cons <> "guix-microvm/vms") %load-path))))
 
 (define (lookup-microvm name)
   (let ((microvms (predefined-microvms)))
@@ -163,7 +163,7 @@ echo ~a >> ~a
 
 (define (load-microvm file)
   (info (G_ "loading microvm from '~a'...~%") file)
-  (match (load* file '((guix-vms microvm) (guix-vms base) (gnu)))
+  (match (load* file '((guix-microvm microvm) (guix-microvm base) (gnu)))
     ((? microvm? vm) vm)
     (_ (leave (G_ "~a: expected a microvm~%") file))))
 
