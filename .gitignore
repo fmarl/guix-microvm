@@ -1,9 +1,5 @@
-# ---> Scheme
-*.ss~
-*.ss#*
-.#*.ss
-
 *.scm~
 *.scm#*
 .#*.scm
 
+.direnv/
