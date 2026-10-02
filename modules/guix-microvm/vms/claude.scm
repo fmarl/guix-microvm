@@ -29,7 +29,6 @@
                               . "1")))
            (operating-system-user-services %base-vm)))))
 
-;; CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token', logs in all projects.
 (define claude-vm
   (microvm
     (operating-system %claude-system)
