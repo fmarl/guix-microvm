@@ -38,15 +38,13 @@ guix microvm --vm=librewolf-vm          # LibreWolf on the host's display
 ```
 
 `vm.scm` and `manifest.scm` are looked up in the current directory and its
-parents, like with `guix shell`, and run on the host.  Authorize the
-directory first:
+parents, like with `guix shell`, and run on the host.  As the VM can change
+them, `guix microvm` refuses new or changed ones until you review them and
+allow them:
 
 ```
-echo ~/src/project >> ~/.config/guix/microvm-authorized-directories
+guix microvm --allow
 ```
-
-The VM can write to the project, so review changes to these files before
-running `guix microvm` again.
 
 ### manifest.scm
 The packages available in the VM:
