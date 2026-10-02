@@ -22,8 +22,7 @@
 (define %vm-uid 1000)
 (define %vm-gid 1000)
 
-;; Binding a vsock port below 1024 requires CAP_NET_BIND_SERVICE, which the
-;; bridge to sshd, running as nobody, lacks.
+;; Ports below 1024 need CAP_NET_BIND_SERVICE, which socat, as nobody, lacks.
 (define %vm-ssh-port 2222)
 
 (define %vm-name-server "10.0.2.3")
@@ -47,8 +46,7 @@
            (string-tokenize
             (call-with-input-file "/proc/cmdline" get-string-all)))))
 
-;; sshd is reached over vsock.  The launcher passes the key it accepts on the
-;; kernel command line, which keeps the key out of the system.
+;; The key comes from the kernel command line, not the system.
 (define ssh-services
   (list (shepherd-service
           (provision '(ssh-vsock))
@@ -77,8 +75,7 @@
                          (chmod file #o444))
                        #t))))))
 
-;; What `guix system image' would put on the root file system, which is an
-;; empty tmpfs here.
+;; The root file system is an empty tmpfs.
 (define root-directories
   (with-imported-modules '((guix build utils))
     #~(begin
@@ -95,8 +92,7 @@
           (chown runtime #$%vm-uid #$%vm-gid)
           (chmod runtime #o700)))))
 
-;; One host key, quick to generate on each boot, rather than one of each type:
-;; the launcher does not check it anyway.
+;; One key type is enough: the launcher does not check it.
 (define ssh-host-key
   (with-imported-modules '((guix build utils))
     #~(begin
@@ -137,8 +133,7 @@ fi
                     (challenge-response-authentication? #f)
                     (x11-forwarding? #f)
                     (allow-agent-forwarding? #f)
-                    ;; For the Wayland socket.  The launcher, the only client,
-                    ;; picks the forwards and the variables it sends.
+                    ;; For the Wayland socket; only the launcher has the key.
                     (allow-tcp-forwarding? #t)
                     (generate-host-keys? #f)
                     (extra-content "\
