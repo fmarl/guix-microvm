@@ -9,7 +9,10 @@
   #:use-module ((guix status) #:select (with-status-verbosity))
   #:use-module (guix store)
   #:use-module (guix ui)
-  #:use-module ((guix utils) #:select (config-directory))
+  #:use-module ((guix utils)
+                #:select (config-directory with-atomic-file-output))
+  #:use-module ((guix base16) #:select (bytevector->base16-string))
+  #:use-module ((gcrypt hash) #:select (sha256 file-sha256))
   #:use-module (gnu system)
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
@@ -17,6 +20,7 @@
                 #:select (contains-home? exit-status))
   #:use-module (ice-9 match)
   #:use-module (ice-9 rdelim)
+  #:use-module ((rnrs bytevectors) #:select (string->utf8))
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:use-module (srfi srfi-37)
@@ -37,6 +41,8 @@ packages of manifest.scm.\n"))
   (display (G_ "
       --share-home       share the project directory even if it is the home
                          directory or one of its parents"))
+  (display (G_ "
+      --allow            allow the current vm.scm and manifest.scm to run"))
   (display (G_ "
   -n, --dry-run          do not build or run the microvm"))
   (newline)
@@ -60,6 +66,9 @@ packages of manifest.scm.\n"))
          (option '("share-home") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'share-home? #t result)))
+         (option '("allow") #f #f
+                 (lambda (opt name arg result)
+                   (alist-cons 'allow? #t result)))
          (option '(#\n "dry-run") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'dry-run? #t result)))
@@ -118,21 +127,53 @@ vm.scm or manifest.scm, or #f."
           ((string=? directory "/") #f)
           (else (loop (dirname directory))))))
 
-(define (authorized-directory-file)
-  (string-append (config-directory #:ensure? #f)
-                 "/microvm-authorized-directories"))
+(define (allowed-file)
+  (string-append (config-directory #:ensure? #f) "/microvm-allowed"))
 
-(define (authorized-directory? directory)
+(define (project-digest project)
+  "Return a digest of vm.scm and manifest.scm in PROJECT, which changes when
+either changes, appears or disappears."
+  (bytevector->base16-string
+   (sha256
+    (string->utf8
+     (string-join
+      (map (lambda (name)
+             (let ((file (string-append project "/" name)))
+               (if (file-exists? file)
+                   (string-append name " "
+                                  (bytevector->base16-string
+                                   (file-sha256 file)))
+                   name)))
+           '("vm.scm" "manifest.scm"))
+      "\n")))))
+
+(define (allowed-projects)
+  "Return the allowed projects, as an alist of directories and digests."
   (catch 'system-error
     (lambda ()
-      (call-with-input-file (authorized-directory-file)
+      (call-with-input-file (allowed-file)
         (lambda (port)
-          (let loop ()
+          (let loop ((projects '()))
             (match (read-line port)
-              ((? eof-object?) #f)
-              (line (or (string=? (string-trim-both line) directory)
-                        (loop))))))))
-    (const #f)))
+              ((? eof-object?) projects)
+              (line
+               (match (string-index line #\space)
+                 (#f (loop projects))
+                 (index
+                  (loop (alist-cons (string-drop line (+ index 1))
+                                    (string-take line index)
+                                    projects))))))))))
+    (const '())))
+
+(define (allow-project! project)
+  (let ((others (alist-delete project (allowed-projects))))
+    (config-directory)
+    (with-atomic-file-output (allowed-file)
+      (lambda (port)
+        (for-each (match-lambda
+                    ((directory . digest)
+                     (format port "~a ~a~%" digest directory)))
+                  (alist-cons project (project-digest project) others))))))
 
 (define (project-files opts)
   "Return the project directory, or #f, and its vm.scm, unless OPTS name a
@@ -142,23 +183,23 @@ predefined microvm, and manifest.scm, or #f."
       (let ((file (and project (string-append project "/" name))))
         (and file (file-exists? file) file)))
 
+    (when (assoc-ref opts 'allow?)
+      (unless project
+        (leave (G_ "no vm.scm or manifest.scm to allow~%")))
+      (allow-project! project))
+
     (let ((vm (and (not (assoc-ref opts 'vm))
                    (project-file "vm.scm")))
           (manifest (project-file "manifest.scm")))
-      ;; Both are code run on the host, outside the VM.
+      ;; Both run on the host, and the VM can change them.
       (when (and (or vm manifest)
-                 (not (authorized-directory? project)))
-        (report-error (G_ "not loading files from '~a' because not \
-authorized to do so~%")
+                 (not (equal? (assoc-ref (allowed-projects) project)
+                              (project-digest project))))
+        (report-error (G_ "not loading vm.scm and manifest.scm from '~a': \
+they are new or changed~%")
                       project)
-        (display-hint (G_ "To allow automatic loading of @file{vm.scm} and
-@file{manifest.scm} in this directory, you must explicitly authorize it, like
-so:
-
-@example
-echo ~a >> ~a
-@end example\n")
-                      project (authorized-directory-file))
+        (display-hint (G_ "They run on the host, and the VM can change them.
+Review them, then run @command{guix microvm --allow}."))
         (exit 1))
       (values project vm manifest))))
 
