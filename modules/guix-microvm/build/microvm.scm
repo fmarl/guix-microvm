@@ -8,6 +8,7 @@
   #:use-module (srfi srfi-71)
   #:use-module (web uri)
   #:export (contains-home?
+            exit-status
             mount-store-items
             run-microvm))
 
@@ -264,7 +265,7 @@ clients in the VM show on the host's Wayland display."
              (log (string-append home ".log"))
              (key (string-append state "/ssh/id_ed25519"))
              (key-blob (ssh-key-blob ssh-keygen key))
-             ;; Unique among running VMs, as this process' PID.
+             ;; Unique among running VMs.
              (cid (number->string (getpid)))
              (guest-waypipe-socket (format #f "/run/user/~a/waypipe.sock"
                                            uid))
@@ -313,10 +314,8 @@ clients in the VM show on the host's Wayland display."
          (lambda (tmp)
            (call-with-processes
             (lambda (start)
-              ;; virtiofsd runs sandboxed, as root of a user namespace in
-              ;; which the host user is root and other users are nobody.
-              ;; It maps the guest's UID and GID with UID-MAP and GID-MAP.
-              ;; Return QEMU's options for the share.
+              ;; virtiofsd runs as root of a user namespace in which the host
+              ;; user is root and other users are nobody.
               (define* (virtiofs tag shared #:key (wrapper '())
                                  uid-map gid-map (options '()))
                 (let ((socket (string-append tmp "/" tag ".sock")))
@@ -337,14 +336,12 @@ clients in the VM show on the host's Wayland display."
                         (string-append "vhost-user-fs-device,chardev=" tag
                                        ",tag=" tag))))
 
-              ;; The guest user owns the host user's files.
               (define (owned-share tag shared)
                 (virtiofs tag shared
                           #:uid-map (format #f "map:~a:0:1" uid)
                           #:gid-map (format #f "map:~a:0:1" gid)))
 
-              ;; Only the store items the VM needs, owned by root as on the
-              ;; host, where they are nobody's in the namespace.
+              ;; Store items are root's, hence nobody's in the namespace.
               (define (store-share)
                 (let ((root (string-append tmp "/store")))
                   (mkdir root)
@@ -366,11 +363,7 @@ clients in the VM show on the host's Wayland display."
                       "--no-map-gw" "--socket" network
                       network-options))
 
-              ;; Forwarded to the guest by the SSH session running the
-              ;; command, rather than over vsock, where other guests could
-              ;; connect.  The security context keeps privileged protocols,
-              ;; e.g. screen capture, from the guest, if the compositor
-              ;; supports it.
+              ;; Forwarded over SSH, not vsock, which other guests can reach.
               (when waypipe
                 (wait-for-socket
                  waypipe-socket
@@ -394,8 +387,6 @@ clients in the VM show on the host's Wayland display."
                                    (owned-share "work" directory)
                                    (owned-share "home" home))))
 
-              ;; QEMU's own messages, e.g. about being stopped, go to the
-              ;; log too, after the serial console's.
               (define vm
                 (call-with-port (begin
                                   (call-with-output-file log (const #t))
@@ -430,9 +421,8 @@ clients in the VM show on the host's Wayland display."
                                                 "--no-gpu" "server" "--")
                                           '())
                                       status-file))))
-                ;; Flush what the guest wrote to the shares before QEMU is
-                ;; stopped, and get the command's exit status, which ssh
-                ;; cannot tell apart from its own.
+                ;; Sync before QEMU is stopped.  The exit status comes from a
+                ;; file, as ssh's own cannot be told apart from the command's.
                 (or (string->number
                      (string-trim-both
                       (ssh-output (string-append "sync; cat " status-file))))
