@@ -93,7 +93,7 @@ in /work under WRAPPER and writes the exit status to STATUS-FILE."
         (string-join (append wrapper (list "sh" "-c" (shell-quote script)))))))
 
 ;; Over SSH: a vsock listener on the host would be open to every guest.
-(define (wayland-forwarding waypipe name socket guest-socket)
+(define (wayland-forwarding waypipe guest-waypipe name socket guest-socket)
   "Return the servers, command wrapper and ssh options that forward Wayland
 from VM NAME to the host, or empty lists without WAYPIPE."
   (if waypipe
@@ -102,7 +102,8 @@ from VM NAME to the host, or empty lists without WAYPIPE."
                               "--secctx" ,(string-append "guix-microvm." name)
                               "client")
                             socket))
-              (list waypipe "--socket" guest-socket "--no-gpu" "server" "--")
+              (list guest-waypipe "--socket" guest-socket "--no-gpu" "server"
+                    "--")
               (list "-o" "ExitOnForwardFailure=yes"
                     "-R" (string-append guest-socket ":" socket)))
       (values '() '() '())))

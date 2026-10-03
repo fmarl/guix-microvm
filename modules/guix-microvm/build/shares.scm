@@ -22,8 +22,9 @@
             share-devices
             virtiofs-device
             mount-store-items
-            entries-to-hide
-            hide-git))
+            find-git-entries
+            read-only-files
+            mount-read-only))
 
 (define-record-type <share>
   (share tag directory options wrapper)
@@ -46,10 +47,8 @@ HOST-GID in its user namespace."
     read))
 
 (define* (vm-shares #:key directory home store store-items stateless? uid gid
-                    mount-store hide-git (git-entries '()))
-  "Return the VM's shares: STORE-ITEMS at STORE, mounted by MOUNT-STORE, and
-DIRECTORY and HOME, owned by UID and GID in the VM.  DIRECTORY is read-only
-if STATELESS?, and HIDE-GIT hides its GIT-ENTRIES."
+                    mount-store mount-read-only (read-only '()))
+  "Return the shares of STORE-ITEMS, DIRECTORY and HOME."
   (let ((owned (id-map-options uid gid 0 0)))
     (list
      ;; Store items belong to root, who is unmapped in the namespace.
@@ -60,7 +59,7 @@ if STATELESS?, and HIDE-GIT hides its GIT-ENTRIES."
      ;; A stateless VM overlays it with a tmpfs.
      (share "work" directory
             (if stateless? (cons "--readonly" owned) owned)
-            (if (null? git-entries) '() `(,hide-git ,@git-entries "--")))
+            (if (null? read-only) '() `(,mount-read-only ,@read-only "--")))
      (share "home" home owned '()))))
 
 (define (share-socket directory share)
@@ -142,26 +141,26 @@ read."
                      directory
                      lstat)))
 
-(define (entries-to-hide directory)
-  "Return the .git entries of DIRECTORY for 'hide-git'.  Fail if one is a
-symbolic link: 'hide-git' would mount over its target, and the VM could
-replace the link."
-  (let ((entries (find-git-entries directory)))
-    (match (find symbolic-link? entries)
-      (#f entries)
-      (link (fail "not sharing ~a, ~a is a symbolic link" directory link)))))
+(define (read-only-files files)
+  "Return the existing FILES.  Fail on symbolic links, which the VM could
+redirect."
+  (let ((files (delete-duplicates
+                (filter (lambda (file)
+                          (false-if-exception (lstat file)))
+                        files))))
+    (for-each (lambda (file)
+                (unless (equal? (false-if-exception (canonicalize-path file))
+                                file)
+                  (fail "~a is a symbolic link or lies under one" file)))
+              files)
+    files))
 
-;; The VM must not write Git hooks or configuration that the host would run.
 ;; A mount point cannot be removed or renamed.
-(define (hide-git . entries)
-  "Mount an empty read-only file system over each .git directory in ENTRIES
-and make each .git file read-only.  Needs a private mount namespace."
-  (let ((flags (logior MS_RDONLY MS_NOSUID MS_NODEV MS_NOEXEC)))
-    (for-each (lambda (entry)
-                (match (stat:type (lstat entry))
-                  ('directory (mount "none" entry "tmpfs" flags "mode=555"))
-                  ('regular
-                   (mount entry entry "none" MS_BIND)
-                   (mount entry entry "none"
-                          (logior MS_BIND MS_REMOUNT flags)))))
-              entries)))
+(define (mount-read-only . files)
+  "Bind-mount FILES read-only on themselves."
+  (for-each (lambda (file)
+              (mount file file "none" (logior MS_BIND MS_REC))
+              (mount file file "none"
+                     (logior MS_BIND MS_REMOUNT MS_RDONLY
+                             MS_NOSUID MS_NODEV MS_NOEXEC)))
+            files))

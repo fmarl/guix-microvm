@@ -34,6 +34,7 @@
             microvm-manifest
             microvm-ports
             microvm-secrets
+            microvm-read-only-files
             microvm-usb?
             microvm-network?
             microvm-memory-size
@@ -60,6 +61,12 @@ error naming FIELD and EXPECTED for others."
 (define (positive-integer? value)
   (and (exact-integer? value) (positive? value)))
 
+(define (relative-file-name? value)
+  (and (string? value)
+       (not (any (lambda (component)
+                   (member component '("" "." "..")))
+                 (string-split value #\/)))))
+
 (define-record-type* <microvm> microvm make-microvm
   microvm?
   (operating-system microvm-operating-system) ;<operating-system>
@@ -81,6 +88,11 @@ error naming FIELD and EXPECTED for others."
                     (default '())
                     (sanitize (validator 'secrets (list-of string?)
                                          "a list of variable names")))
+  (read-only-files  microvm-read-only-files
+                    (default '())
+                    (sanitize (validator 'read-only-files
+                                         (list-of relative-file-name?)
+                                         "a list of relative file names")))
   (usb?             microvm-usb?
                     (default #f))
   (network?         microvm-network?
@@ -189,8 +201,8 @@ the command after them."
 (define mount-store
   (namespace-wrapper "mount-store" 'mount-store-items))
 
-(define hide-git
-  (namespace-wrapper "hide-git" 'hide-git))
+(define mount-read-only
+  (namespace-wrapper "mount-read-only" 'mount-read-only))
 
 (define (microvm-profile vm)
   (and=> (microvm-manifest vm)
@@ -251,6 +263,7 @@ shares DIR at /work and runs COMMAND there."
               (cpu-count #$(microvm-cpu-count vm))
               (network-options '#$(microvm-network-options vm guest))
               (secrets '#$(microvm-secrets vm))
+              (read-only-files '#$(microvm-read-only-files vm))
               (usb? #$(microvm-usb? vm))
               (user #$(microvm-guest-configuration-user guest))
               (uid #$(microvm-guest-configuration-uid guest))
@@ -260,14 +273,17 @@ shares DIR at /work and runs COMMAND there."
               (qemu #$(file-append qemu-locked "/bin/qemu-system-x86_64"))
               (virtiofsd #$(file-append virtiofsd "/bin/virtiofsd"))
               (passt #$(file-append passt "/bin/passt"))
-              (waypipe #$(and wayland? (file-append waypipe "/bin/waypipe")))
+              (waypipe #$(and wayland?
+                              (file-append waypipe-locked "/bin/waypipe")))
+              (guest-waypipe #$(and wayland?
+                                    (file-append waypipe "/bin/waypipe")))
               (ssh #$(file-append openssh "/bin/ssh"))
               (ssh-keygen #$(file-append openssh "/bin/ssh-keygen"))
               (socat #$(file-append socat "/bin/socat"))
               (git #$(file-append git-minimal "/bin/git"))
               (unshare #$(file-append util-linux "/bin/unshare"))
               (mount-store #$mount-store)
-              (hide-git #$hide-git)))))))))
+              (mount-read-only #$mount-read-only)))))))))
 
 (define-gexp-compiler (microvm-compiler (vm <microvm>) system target)
   (lower-object (microvm-launcher vm) system #:target target))

@@ -182,6 +182,7 @@ sleep."
                 (kernel "/k") (initrd "/i") (kernel-arguments '())
                 (store-items "/s") (profile #f) (memory-size 4096)
                 (cpu-count 4) (network-options #f) (secrets '())
+                (read-only-files '())
                 (usb? #f) (user "u") (uid 1000) (gid 1000)
                 (ssh-port 2222)))))
         (list (invocation-directory invocation)
@@ -304,35 +305,48 @@ sleep."
   (virtiofs-device (share "work" "/w" '() '()) "/w.sock"))
 
 (let ((project (string-append tmp "/git")))
-  (write-file (string-append project "/.git/config") "")
-  (write-file (string-append project "/.git/modules/m/.git") "")
-  (write-file (string-append project "/m/.git") "gitdir: ../.git/modules/m")
-  (write-file (string-append project "/a/b/.git/HEAD") "")
-  (write-file (string-append project "/a/file") "")
+  (define (absolute file)
+    (string-append project "/" file))
 
-  (test-equal "git-entries"
+  (define (relative files)
+    (sort (map (cut string-drop <> (string-length project)) files) string<?))
+
+  (write-file (absolute ".git/config") "")
+  (write-file (absolute ".git/modules/m/.git") "")
+  (write-file (absolute "m/.git") "gitdir: ../.git/modules/m")
+  (write-file (absolute "a/b/.git/HEAD") "")
+  (write-file (absolute "a/file") "")
+  (write-file (absolute ".envrc") "")
+
+  (test-equal "find-git-entries"
     '("/.git" "/a/b/.git" "/m/.git")
-    (map (cut string-drop <> (string-length project))
-         (sort (entries-to-hide project) string<?)))
+    (relative (find-git-entries project)))
 
-  (test-equal "entries-to-hide, unreadable directory"
+  (test-equal "find-git-entries, unreadable directory"
     1
-    (let ((locked (string-append project "/locked")))
+    (let ((locked (absolute "locked")))
       (mkdir locked #o000)
-      (let ((status (exit-code (cut entries-to-hide project))))
+      (let ((status (exit-code (cut find-git-entries project))))
         (rmdir locked)
         status)))
 
-  (test-assert "entries-to-hide, symbolic link"
+  (test-equal "read-only-files"
+    '("/.envrc" "/a/file")
+    (relative (read-only-files
+               (map absolute '(".envrc" "a/file" "a/file" ".dir-locals.el")))))
+
+  (test-equal "read-only-files, symbolic links"
+    '(1 1)
     (begin
-      (symlink "/nowhere" (string-append project "/a/.git"))
-      (guard (error ((launcher-error? error) #t))
-        (entries-to-hide project)
-        #f))))
+      (symlink "a" (absolute "link"))
+      (symlink "/nowhere" (absolute "dangling"))
+      (map (lambda (file)
+             (exit-code (cut read-only-files (list (absolute file)))))
+           '("link/file" "dangling")))))
 
 (test-equal "vm-shares"
   '((("store" "/s" #t ("/mount-store" "/items" "/s" "--"))
-     ("work" "/p" #f ("/hide-git" "/p/.git" "--"))
+     ("work" "/p" #f ("/mount-read-only" "/p/.git" "--"))
      ("home" "/h" #f ()))
     (#t ("--readonly" "--translate-uid" "map:1000:0:1"
          "--translate-gid" "map:100:0:1")
@@ -343,12 +357,13 @@ sleep."
                             #:uid 1000 #:gid 100 #:store "/s"
                             #:store-items "/items"
                             #:mount-store "/mount-store"
-                            #:hide-git "/hide-git" #:git-entries '("/p/.git"))
+                            #:mount-read-only "/mount-read-only"
+                            #:read-only '("/p/.git"))
                  (vm-shares #:directory "/p" #:home "/h" #:stateless? #t
                             #:uid 1000 #:gid 100 #:store "/s"
                             #:store-items "/items"
                             #:mount-store "/mount-store"
-                            #:hide-git "/hide-git"))))
+                            #:mount-read-only "/mount-read-only"))))
     (list (map (lambda (share)
                  (list (share-tag share) (share-directory share)
                        (and (member "--readonly" (share-options share)) #t)
@@ -360,19 +375,20 @@ sleep."
 
 (test-equal "wayland-forwarding"
   '((() () ())
-    (("/waypipe" "/h.sock")
-     ("/waypipe" "--socket" "/g.sock" "--no-gpu" "server" "--")
+    (("/host/waypipe" "/h.sock")
+     ("/guest/waypipe" "--socket" "/g.sock" "--no-gpu" "server" "--")
      ("-o" "ExitOnForwardFailure=yes" "-R" "/g.sock:/h.sock")))
-  (map (lambda (waypipe)
-         (let ((servers wrapper options
-                        (wayland-forwarding waypipe "vm" "/h.sock"
-                                            "/g.sock")))
-           (list (append-map (lambda (server)
-                               (list (server-program server)
-                                     (server-socket server)))
-                             servers)
-                 wrapper options)))
-       '(#f "/waypipe")))
+  (map (match-lambda
+         ((waypipe guest-waypipe)
+          (let ((servers wrapper options
+                         (wayland-forwarding waypipe guest-waypipe "vm"
+                                             "/h.sock" "/g.sock")))
+            (list (append-map (lambda (server)
+                                (list (server-program server)
+                                      (server-socket server)))
+                              servers)
+                  wrapper options))))
+       '((#f #f) ("/host/waypipe" "/guest/waypipe"))))
 
 (test-equal "printable"
   "a\tb\n?]52;c;eA==?\\ä?"
@@ -486,6 +502,7 @@ sleep."
     "ports: expected a list of PORT or (HOST . GUEST), got ((80 . \"x\"))"
     "secrets: expected a list of variable names, got \"TOKEN\""
     "memory-size: expected a positive integer, got 0"
+    "read-only-files: expected a list of relative file names, got (\"../x\")"
     #f)
   (map error-message
        (list (lambda () (microvm (operating-system %base-vm) (ports '(0))))
@@ -495,6 +512,9 @@ sleep."
                (microvm (operating-system %base-vm) (secrets "TOKEN")))
              (lambda ()
                (microvm (operating-system %base-vm) (memory-size 0)))
+             (lambda ()
+               (microvm (operating-system %base-vm)
+                 (read-only-files '("../x"))))
              (lambda ()
                (microvm (operating-system %base-vm)
                  (ports '(3000 (8080 . 80)))
