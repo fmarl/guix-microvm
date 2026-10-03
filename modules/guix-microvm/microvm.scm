@@ -35,6 +35,7 @@
             microvm-ports
             microvm-secrets
             microvm-usb?
+            microvm-network?
             microvm-memory-size
             microvm-cpu-count))
 
@@ -47,7 +48,6 @@ error naming FIELD and EXPECTED for others."
         (raise-exception
          (formatted-message (G_ "~a: expected ~a, got ~s")
                             field expected value)))))
-
 
 (define (port-number? value)
   (and (exact-integer? value) (<= 1 value 65535)))
@@ -63,31 +63,33 @@ error naming FIELD and EXPECTED for others."
 (define-record-type* <microvm> microvm make-microvm
   microvm?
   (operating-system microvm-operating-system) ;<operating-system>
-  (command          microvm-command           ;list of strings
+  (command          microvm-command
                     (default '())
                     (sanitize (validator 'command (list-of string?)
                                          "a list of strings")))
-  (wayland?         microvm-wayland?          ;Boolean
+  (wayland?         microvm-wayland?
                     (default #f))
-  (stateless?       microvm-stateless?        ;Boolean
+  (stateless?       microvm-stateless?
                     (default #f))
   (manifest         microvm-manifest          ;<manifest> | #f
                     (default #f))
-  (ports            microvm-ports             ;list of PORT | (HOST . GUEST)
+  (ports            microvm-ports
                     (default '())
                     (sanitize (validator 'ports (list-of forwarded-port?)
                                          "a list of PORT or (HOST . GUEST)")))
-  (secrets          microvm-secrets           ;list of variable names
+  (secrets          microvm-secrets
                     (default '())
                     (sanitize (validator 'secrets (list-of string?)
                                          "a list of variable names")))
-  (usb?             microvm-usb?              ;Boolean
+  (usb?             microvm-usb?
                     (default #f))
-  (memory-size      microvm-memory-size       ;integer (MiB)
+  (network?         microvm-network?
+                    (default #t))
+  (memory-size      microvm-memory-size       ;MiB
                     (default 4096)
                     (sanitize (validator 'memory-size positive-integer?
                                          "a positive integer")))
-  (cpu-count        microvm-cpu-count         ;integer
+  (cpu-count        microvm-cpu-count
                     (default 4)
                     (sanitize (validator 'cpu-count positive-integer?
                                          "a positive integer"))))
@@ -164,17 +166,31 @@ from the host's loopback to the guest."
                           #:select? build-module?)
     exp))
 
-(define mount-store
+(define (namespace-wrapper name setup)
+  "Return the program NAME that applies SETUP, a symbol naming a procedure of
+(guix-microvm build shares), to its arguments up to \"--\" and then executes
+the command after them."
   (program-file
-   "mount-store"
+   name
    (with-build-modules
     #~(begin
-        (use-modules (guix-microvm build microvm)
-                     (ice-9 match))
-        (match (cdr (command-line))
-          ((items root program args ...)
-           (mount-store-items items root)
-           (apply execl program program args)))))))
+        (use-modules (guix-microvm build shares)
+                     (ice-9 match)
+                     (srfi srfi-1)
+                     (srfi srfi-26)
+                     (srfi srfi-71))
+        (let ((arguments rest (break (cut string=? "--" <>)
+                                     (cdr (command-line)))))
+          (match rest
+            (("--" program args ...)
+             (apply #$setup arguments)
+             (apply execl program program args))))))))
+
+(define mount-store
+  (namespace-wrapper "mount-store" 'mount-store-items))
+
+(define hide-git
+  (namespace-wrapper "hide-git" 'hide-git))
 
 (define (microvm-profile vm)
   (and=> (microvm-manifest vm)
@@ -182,21 +198,30 @@ from the host's loopback to the guest."
            (profile (content manifest)))))
 
 (define (microvm-store-roots vm os profile)
-  "Return what the store of VM contains the closure of: OS, PROFILE if any,
-and waypipe for Wayland."
   (filter identity (list os profile (and (microvm-wayland? vm) waypipe))))
+
+(define (check-microvm vm)
+  "Raise an error if fields of VM contradict each other."
+  (when (and (not (microvm-network? vm))
+             (pair? (microvm-ports vm)))
+    (raise-exception
+     (formatted-message
+      (G_ "~a: ports need a network")
+      (operating-system-host-name (microvm-operating-system vm))))))
 
 (define (microvm-network-options vm guest)
   "Return passt options for the network of GUEST, VM's guest configuration,
-and for VM's ports."
-  (append (passt-network-options
-           (microvm-guest-configuration-network guest)
-           (microvm-guest-configuration-name-server guest))
-          (append-map passt-port-options (microvm-ports vm))))
+and for VM's ports, or #f if VM has no network."
+  (and (microvm-network? vm)
+       (append (passt-network-options
+                (microvm-guest-configuration-network guest)
+                (microvm-guest-configuration-name-server guest))
+               (append-map passt-port-options (microvm-ports vm)))))
 
 (define (microvm-launcher vm)
   "Return the launcher of VM.  run-NAME [DIR] [-- COMMAND...] boots VM,
 shares DIR at /work and runs COMMAND there."
+  (check-microvm vm)
   (let* ((os (microvm-operating-system vm))
          (name (operating-system-host-name os))
          (root (file-system-device (operating-system-root-file-system os)))
@@ -211,36 +236,38 @@ shares DIR at /work and runs COMMAND there."
           (exit
            (run-microvm
             (cdr (command-line))
-            #:name #$name
-            #:default-command '#$(microvm-command vm)
-            #:stateless? #$(microvm-stateless? vm)
-            #:kernel #$(operating-system-kernel-file os)
-            #:initrd #$(file-append os "/initrd")
-            #:kernel-arguments
-            (list #$@(operating-system-kernel-arguments os root))
-            #:store-items #$(store-items
-                             (microvm-store-roots vm os project-profile))
-            #:profile #$project-profile
-            #:memory-size #$(microvm-memory-size vm)
-            #:cpu-count #$(microvm-cpu-count vm)
-            #:user #$(microvm-guest-configuration-user guest)
-            #:uid #$(microvm-guest-configuration-uid guest)
-            #:gid #$(microvm-guest-configuration-gid guest)
-            #:ssh-port #$(microvm-guest-configuration-ssh-port guest)
-            #:network-options
-            '#$(microvm-network-options vm guest)
-            #:secrets '#$(microvm-secrets vm)
-            #:usb? #$(microvm-usb? vm)
-            #:qemu #$(file-append qemu-locked "/bin/qemu-system-x86_64")
-            #:virtiofsd #$(file-append virtiofsd "/bin/virtiofsd")
-            #:passt #$(file-append passt "/bin/passt")
-            #:waypipe #$(and wayland? (file-append waypipe "/bin/waypipe"))
-            #:ssh #$(file-append openssh "/bin/ssh")
-            #:ssh-keygen #$(file-append openssh "/bin/ssh-keygen")
-            #:socat #$(file-append socat "/bin/socat")
-            #:git #$(file-append git-minimal "/bin/git")
-            #:unshare #$(file-append util-linux "/bin/unshare")
-            #:mount-store #$mount-store)))))))
+            (vm-config
+              (name #$name)
+              (command '#$(microvm-command vm))
+              (stateless? #$(microvm-stateless? vm))
+              (kernel #$(operating-system-kernel-file os))
+              (initrd #$(file-append os "/initrd"))
+              (kernel-arguments
+               (list #$@(operating-system-kernel-arguments os root)))
+              (store-items #$(store-items
+                              (microvm-store-roots vm os project-profile)))
+              (profile #$project-profile)
+              (memory-size #$(microvm-memory-size vm))
+              (cpu-count #$(microvm-cpu-count vm))
+              (network-options '#$(microvm-network-options vm guest))
+              (secrets '#$(microvm-secrets vm))
+              (usb? #$(microvm-usb? vm))
+              (user #$(microvm-guest-configuration-user guest))
+              (uid #$(microvm-guest-configuration-uid guest))
+              (gid #$(microvm-guest-configuration-gid guest))
+              (ssh-port #$(microvm-guest-configuration-ssh-port guest)))
+            (tools
+              (qemu #$(file-append qemu-locked "/bin/qemu-system-x86_64"))
+              (virtiofsd #$(file-append virtiofsd "/bin/virtiofsd"))
+              (passt #$(file-append passt "/bin/passt"))
+              (waypipe #$(and wayland? (file-append waypipe "/bin/waypipe")))
+              (ssh #$(file-append openssh "/bin/ssh"))
+              (ssh-keygen #$(file-append openssh "/bin/ssh-keygen"))
+              (socat #$(file-append socat "/bin/socat"))
+              (git #$(file-append git-minimal "/bin/git"))
+              (unshare #$(file-append util-linux "/bin/unshare"))
+              (mount-store #$mount-store)
+              (hide-git #$hide-git)))))))))
 
 (define-gexp-compiler (microvm-compiler (vm <microvm>) system target)
   (lower-object (microvm-launcher vm) system #:target target))

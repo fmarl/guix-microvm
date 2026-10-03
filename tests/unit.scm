@@ -3,7 +3,11 @@
 
 ;; Unit tests of the launcher and the extension, without a VM.
 
-(use-modules (guix-microvm build microvm)
+(use-modules (guix-microvm build error)
+             (guix-microvm build microvm)
+             (guix-microvm build process)
+             (guix-microvm build shares)
+             (guix-microvm build ssh)
              (guix-microvm base)
              (guix-microvm control)
              (guix-microvm microvm)
@@ -32,24 +36,25 @@
   (begin (define name (@@ module name)) ...))
 
 (define-private (guix-microvm build microvm)
-  parse-arguments vm-files git-identity read-secrets environment-with
-  shell-quote remote-command serial-options id-map-options virtiofs-device
-  qemu-arguments open-log call-with-temporary-directory call-with-process
-  call-with-servers server share vm-shares wayland-forwarding
-  vm-kernel-arguments existing-directory launcher-error?
-  launcher-error-status call-with-launcher-errors fail share-tag
-  share-directory share-options share-wrapper server-program server-socket)
+  parse-arguments existing-directory getenv-positive-integer parse-invocation
+  invocation-directory invocation-command invocation-stateless?
+  invocation-share-home? invocation-memory invocation-cpus vm-files
+  git-config git-identity read-secrets environment-with serial-options
+  qemu-arguments vm-kernel-arguments open-log call-with-temporary-directory
+  printable contains-home?)
 
 (define-private (guix-microvm microvm)
-  passt-port-options passt-network-options guest-configuration)
+  passt-port-options passt-network-options microvm-network-options
+  check-microvm
+  guest-configuration)
 
 (define-private (guix-microvm control)
   process-exists? usb-id-matches? usb-host-arguments running-vm)
 
 (define-private (guix extensions microvm)
-  string->port launcher-flags project-directory read-project project-digest
-  allowed-project allowed-projects allow-project! project-allowed?
-  project-file project-files eval-file load-object)
+  string->forwarded-port launcher-flags project-directory read-project
+  project-digest line->allowed-project allowed-projects allow-project!
+  project-allowed? project-file project-files eval-file load-object)
 
 (define-syntax-rule (values->list exp)
   (call-with-values (lambda () exp) list))
@@ -131,8 +136,6 @@ sleep."
   (mkdtemp (string-append (or (getenv "TMPDIR") "/tmp")
                           "/guix-microvm-test.XXXXXX")))
 
-;;; Command line
-
 (test-equal "parse-arguments, nothing"
   '(() "." ())
   (values->list (parse-arguments '())))
@@ -158,6 +161,45 @@ sleep."
         (exit-code (lambda ()
                      (existing-directory (string-append tmp "/none"))))))
 
+(test-equal "getenv-positive-integer"
+  '(7 3 1 1 1)
+  (map (lambda (value)
+         (with-environment `(("VM_TEST" . ,value))
+           (lambda ()
+             (or (exit-code (lambda () (getenv-positive-integer "VM_TEST" 7)))
+                 (getenv-positive-integer "VM_TEST" 7)))))
+       '(#f "3" "1.5" "0" "x")))
+
+(test-equal "parse-invocation"
+  `(,(canonicalize-path tmp) ("make") #t #t 512 4)
+  (with-environment '(("VM_MEMORY" . "512") ("VM_CPUS" . #f))
+    (lambda ()
+      (let ((invocation
+             (parse-invocation
+              `("--share-home" ,tmp "--" "make")
+              (vm-config
+                (name "vm") (command '("sh")) (stateless? #t)
+                (kernel "/k") (initrd "/i") (kernel-arguments '())
+                (store-items "/s") (profile #f) (memory-size 4096)
+                (cpu-count 4) (network-options #f) (secrets '())
+                (usb? #f) (user "u") (uid 1000) (gid 1000)
+                (ssh-port 2222)))))
+        (list (invocation-directory invocation)
+              (invocation-command invocation)
+              (invocation-stateless? invocation)
+              (invocation-share-home? invocation)
+              (invocation-memory invocation)
+              (invocation-cpus invocation))))))
+
+(test-equal "check-shareable"
+  '(1 #f #f)
+  (with-environment `(("HOME" . ,(string-append tmp "/home")))
+    (lambda ()
+      (mkdir-p (string-append tmp "/home"))
+      (list (exit-code (cut check-shareable tmp #f))
+            (exit-code (cut check-shareable tmp #t))
+            (exit-code (cut check-shareable (string-append tmp "/p") #f))))))
+
 (test-assert "contains-home?"
   (and (contains-home? "/" "/home/u")
        (contains-home? "/home" "/home/u")
@@ -165,8 +207,6 @@ sleep."
        (not (contains-home? "/home/u/src" "/home/u"))
        (not (contains-home? "/home/us" "/home/u"))
        (not (contains-home? "/home/u" "/home/us"))))
-
-;;; Files and environment
 
 (test-equal "vm-files"
   '("/d/vm/%2Fp%20q" "/d/vm/%2Fp%20q.log" "/d/ssh/id_ed25519")
@@ -185,6 +225,14 @@ sleep."
                       ("GIT_COMMITTER_EMAIL" . #f))
     (lambda ()
       (git-identity "/nonexistent/git" tmp))))
+
+(test-equal "git-config, unset or failing"
+  '(#f #f)
+  (list (with-environment '(("GIT_CONFIG_GLOBAL" . "/dev/null")
+                            ("GIT_CONFIG_NOSYSTEM" . "1"))
+          (lambda ()
+            (git-config "git" tmp "user.name")))
+        (git-config "git" "/nonexistent" "user.name")))
 
 (test-equal "git-identity, from the Git configuration"
   '(("GIT_AUTHOR_NAME" . "B") ("GIT_AUTHOR_EMAIL" . "b@x")
@@ -220,8 +268,6 @@ sleep."
                       (string-prefix? "PATH=" entry)))
                 environment)))))
 
-;;; Shell commands
-
 (test-equal "shell-quote"
   "it's \"$HOME\" `x` \\"
   (sh-output (string-append "printf %s "
@@ -242,8 +288,6 @@ sleep."
   (sh-output (remote-command '("echo" "it's") '("printf" "'%s\\n'")
                              "/s")))
 
-;;; QEMU and virtiofsd
-
 (test-equal "serial-options"
   '(("-chardev" "file,id=serial,path=/l,append=on" "-serial"
      "chardev:serial")
@@ -259,29 +303,60 @@ sleep."
     "-device" "vhost-user-fs-device,chardev=work,tag=work")
   (virtiofs-device (share "work" "/w" '() '()) "/w.sock"))
 
+(let ((project (string-append tmp "/git")))
+  (write-file (string-append project "/.git/config") "")
+  (write-file (string-append project "/.git/modules/m/.git") "")
+  (write-file (string-append project "/m/.git") "gitdir: ../.git/modules/m")
+  (write-file (string-append project "/a/b/.git/HEAD") "")
+  (write-file (string-append project "/a/file") "")
+
+  (test-equal "git-entries"
+    '("/.git" "/a/b/.git" "/m/.git")
+    (map (cut string-drop <> (string-length project))
+         (sort (entries-to-hide project) string<?)))
+
+  (test-equal "entries-to-hide, unreadable directory"
+    1
+    (let ((locked (string-append project "/locked")))
+      (mkdir locked #o000)
+      (let ((status (exit-code (cut entries-to-hide project))))
+        (rmdir locked)
+        status)))
+
+  (test-assert "entries-to-hide, symbolic link"
+    (begin
+      (symlink "/nowhere" (string-append project "/a/.git"))
+      (guard (error ((launcher-error? error) #t))
+        (entries-to-hide project)
+        #f))))
+
 (test-equal "vm-shares"
-  '((("store" "/s" #t ("/mount-store" "/items" "/s"))
-     ("work" "/p" #f ())
+  '((("store" "/s" #t ("/mount-store" "/items" "/s" "--"))
+     ("work" "/p" #f ("/hide-git" "/p/.git" "--"))
      ("home" "/h" #f ()))
     (#t ("--readonly" "--translate-uid" "map:1000:0:1"
-         "--translate-gid" "map:100:0:1")))
+         "--translate-gid" "map:100:0:1")
+     ()))
   (let ((shares stateless
                 (values
                  (vm-shares #:directory "/p" #:home "/h" #:stateless? #f
                             #:uid 1000 #:gid 100 #:store "/s"
                             #:store-items "/items"
-                            #:mount-store "/mount-store")
+                            #:mount-store "/mount-store"
+                            #:hide-git "/hide-git" #:git-entries '("/p/.git"))
                  (vm-shares #:directory "/p" #:home "/h" #:stateless? #t
                             #:uid 1000 #:gid 100 #:store "/s"
                             #:store-items "/items"
-                            #:mount-store "/mount-store"))))
+                            #:mount-store "/mount-store"
+                            #:hide-git "/hide-git"))))
     (list (map (lambda (share)
                  (list (share-tag share) (share-directory share)
                        (and (member "--readonly" (share-options share)) #t)
                        (share-wrapper share)))
                shares)
           (list (equal? (map share-tag shares) (map share-tag stateless))
-                (share-options (second stateless))))))
+                (share-options (second stateless))
+                (share-wrapper (second stateless))))))
 
 (test-equal "wayland-forwarding"
   '((() () ())
@@ -298,6 +373,10 @@ sleep."
                              servers)
                  wrapper options)))
        '(#f "/waypipe")))
+
+(test-equal "printable"
+  "a\tb\n?]52;c;eA==?\\ä?"
+  (printable "a\tb\r\n\x1b]52;c;eA==\x1b\\ä\x9b"))
 
 (test-equal "vm-kernel-arguments"
   '(("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K" "a")
@@ -317,6 +396,7 @@ sleep."
     (and (equal? (take (member "-append" arguments) 2)
                  '("-append" "a=1 b"))
          (member "-no-reboot" arguments)
+         (string-prefix? "on," (second (member "-sandbox" arguments)))
          (equal? (take (member "-m" arguments) 4) '("-m" "512" "-smp" "2"))
          (member "vhost-vsock-device,guest-cid=42" arguments)
          (member "unix:/q.sock,server=on,wait=off" arguments)
@@ -333,6 +413,16 @@ sleep."
                                  #:qmp "/q.sock")))
        '(#f #t)))
 
+(test-equal "qemu-arguments, no network"
+  '(#f ("-device" "virtio-net-device"))
+  (let ((arguments (qemu-arguments #:kernel "/k" #:initrd "/i"
+                                   #:kernel-arguments '() #:memory 512
+                                   #:cpus 2 #:cid "42" #:network #f
+                                   #:serial '() #:devices '()
+                                   #:qmp "/q.sock")))
+    (list (member "-netdev" arguments)
+          (take-right arguments 2))))
+
 (test-equal "passt-port-options"
   '(("--tcp-ports" "127.0.0.1/3000")
     ("--tcp-ports" "127.0.0.1/8080:80"))
@@ -345,7 +435,23 @@ sleep."
     (passt-network-options (microvm-guest-configuration-network guest)
                            (microvm-guest-configuration-name-server guest))))
 
-;;; Guest
+(test-equal "microvm-network-options"
+  '(#t #f)
+  (let* ((vm (microvm (operating-system %base-vm) (ports '(3000))))
+         (guest (guest-configuration %base-vm)))
+    (list (and (member "127.0.0.1/3000" (microvm-network-options vm guest))
+               #t)
+          (microvm-network-options (microvm (inherit vm) (network? #f))
+                                   guest))))
+
+(test-equal "check-microvm"
+  '("vm: ports need a network" #f)
+  (map (lambda (ports)
+         (error-message
+          (cut check-microvm (microvm (operating-system %base-vm)
+                               (network? #f)
+                               (ports ports)))))
+       '((3000) ())))
 
 (test-equal "guest-configuration, as configured"
   '("dev" 1001 2223)
@@ -409,8 +515,6 @@ sleep."
                             (routes '())))))
              (lambda () (microvm-guest-configuration (ssh-port 2223))))))
 
-;;; Processes
-
 (test-equal "open-log empties the file"
   "new"
   (let ((file (string-append tmp "/log")))
@@ -468,8 +572,6 @@ sleep."
                              (fail "no ~a" "x"))))))))
     (list status output (call-with-launcher-errors (const 7)))))
 
-;;; Control
-
 (define (fake-qmp-server file)
   "Serve QMP at FILE to one client.  Return the serving thread; joining it
 gives the commands received.  Each reply follows an event; the command
@@ -502,10 +604,9 @@ gives the commands received.  Each reply follows an event; the command
                            `(("return" . (("answer" . ,command))))))
                  (loop (cons command commands))))))))))))
 
-
 (test-equal "string->usb-id"
-  '((#x1050 . #f) (#x1050 . #x0407) #f #f)
-  (map string->usb-id '("1050" "1050:0407" "yubi" "1:2:3")))
+  '((#x1050 . #f) (#x1050 . #x0407) #f #f #f #f)
+  (map string->usb-id '("1050" "1050:0407" "yubi" "1:2:3" "10000" "-1")))
 
 (test-equal "usb-id-matches?"
   '(#t #t #f #f)
@@ -578,20 +679,18 @@ gives the commands received.  Each reply follows an event; the command
                '(#xffff . #f))))
        '(#f #t)))
 
-;;; Extension
-
-(test-equal "string->port"
+(test-equal "string->forwarded-port"
   '(3000 (8080 . 80) 1)
-  (list (string->port "3000")
-        (string->port "8080:80")
+  (list (string->forwarded-port "3000")
+        (string->forwarded-port "8080:80")
         (exit-code (lambda ()
                      (quietly
                        (lambda ()
-                         (string->port "x")))))))
+                         (string->forwarded-port "x")))))))
 
-(test-equal "allowed-project"
+(test-equal "line->allowed-project"
   '(("/p q" . "abc") #f #f)
-  (map allowed-project '("abc /p q" "" "abc")))
+  (map line->allowed-project '("abc /p q" "" "abc")))
 
 (test-equal "launcher-flags"
   '(() ("--share-home" "--stateless"))
@@ -647,15 +746,20 @@ gives the commands received.  Each reply follows an event; the command
          (lambda ()
            (load-object file "number" number? '()))))))
 
-  (test-equal "eval-file, errors"
-    '(1 1)
-    (map (lambda (code)
-           (exit-code
-            (lambda ()
-              (quietly
-               (lambda ()
-                 (eval-file manifest (string->utf8 code) '()))))))
-         '("(" "unbound-variable")))
+  (test-equal "eval-file uses MODULES"
+    1
+    (quietly
+     (lambda ()
+       (eval-file manifest (string->utf8 "(match '(1) ((x) (first '(1))))")
+                  '((ice-9 match) (srfi srfi-1))))))
+
+  (test-assert "eval-file, errors"
+    (every (lambda (code)
+             (string-prefix?
+              (string-append "failed to load '" manifest "': ")
+              (error-message
+               (cut eval-file manifest (string->utf8 code) '()))))
+           '("(" "unbound-variable")))
 
   (with-environment `(("XDG_CONFIG_HOME" . ,(string-append tmp "/config")))
     (lambda ()

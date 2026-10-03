@@ -24,7 +24,6 @@
             microvm-guest-configuration-ssh-port
             microvm-guest-configuration-network
             microvm-guest-configuration-name-server
-            microvm-guest-runtime-directory
             microvm-guest-service-type
             %microvm-base-services
             %base-vm))
@@ -43,7 +42,6 @@
 (define (unprivileged-port? value)
   (and (exact-integer? value) (<= 1024 value 65535)))
 
-;; passt serves one address and route.
 (define (passt-network? value)
   (and (static-networking? value)
        (= 1 (length (static-networking-addresses value)))
@@ -87,7 +85,7 @@
   "Return the service forwarding vsock PORT to the SSH daemon."
   (shepherd-service
     (provision '(ssh-vsock))
-    (requirement '(ssh-daemon work-overlay))
+    (requirement '(ssh-daemon ssh-authorized-key work-overlay))
     (start #~(make-forkexec-constructor
               (list #$(file-append socat "/bin/socat")
                     #$(string-append "VSOCK-LISTEN:" (number->string port)
@@ -96,7 +94,6 @@
               #:user "nobody" #:group "nogroup"))
     (stop #~(make-kill-destructor))))
 
-;; The key comes from the kernel command line, not the system.
 (define (ssh-authorized-key-service user)
   "Return the service that authorizes the launcher's key for USER."
   (shepherd-service
@@ -128,7 +125,7 @@
                        (lower (stat "/work")))
                    (mkdir-p upper)
                    (mkdir-p work)
-                   ;; The overlay's root takes after UPPER.
+                   ;; The overlay's root gets the owner and mode of UPPER.
                    (chown upper (stat:uid lower) (stat:gid lower))
                    (chmod upper (stat:perms lower))
                    (mount "overlay" "/work" "overlay" 0
@@ -142,8 +139,6 @@
           (ssh-vsock-service ssh-port)
           (ssh-authorized-key-service user))))
 
-;; The root file system is an empty tmpfs.  One host key type is enough: the
-;; launcher does not check it.
 (define (guest-activation config)
   (match-record config <microvm-guest-configuration> (uid gid)
     (with-imported-modules '((guix build utils))
@@ -164,7 +159,6 @@
                   "-t" "ed25519" "-N" ""
                   "-f" "/etc/ssh/ssh_host_ed25519_key")))))
 
-;; For FIDO keys among the USB devices of the VM.
 (define (guest-udev-rules config)
   (list (udev-rule "90-guix-microvm.rules"
                    (format #f "SUBSYSTEM==\"hidraw\", MODE=\"0660\", \
@@ -190,7 +184,7 @@ GROUP=\"~a\"~%"
             (inherit network)
             (name-servers (list name-server))))))
 
-(define project-profile
+(define project-profile-script
   (plain-file "guix-microvm-profile.sh" "\
 if [ -n \"$GUIX_MICROVM_PROFILE\" ]
 then
@@ -224,7 +218,7 @@ fi
            (service-extension static-networking-service-type
                               guest-networks)
            (service-extension etc-profile-d-service-type
-                              (const (list project-profile)))
+                              (const (list project-profile-script)))
            (service-extension etc-bashrc-d-service-type
                               (const (list microvm-prompt)))
            (service-extension udev-service-type guest-udev-rules)
@@ -247,12 +241,10 @@ stateless VMs.")))
                     (challenge-response-authentication? #f)
                     (x11-forwarding? #f)
                     (allow-agent-forwarding? #f)
-                    ;; For the Wayland socket; only the launcher has the key.
-                    (allow-tcp-forwarding? #t)
+                    (accepted-environment '("*"))
                     (generate-host-keys? #f)
-                    (extra-content "\
-HostKey /etc/ssh/ssh_host_ed25519_key
-AcceptEnv *\n")))
+                    (extra-content
+                     "HostKey /etc/ssh/ssh_host_ed25519_key\n")))
          (service special-files-service-type
                   `(("/bin/sh" ,(file-append bash "/bin/sh"))
                     ("/usr/bin/env" ,(file-append coreutils "/bin/env"))))
@@ -266,7 +258,8 @@ AcceptEnv *\n")))
            (delete log-rotation-service-type)
            (delete log-cleanup-service-type))))
 
-(define* (virtiofs tag mount-point #:key read-only? needed-for-boot?)
+(define* (virtiofs-file-system tag mount-point
+                               #:key read-only? needed-for-boot?)
   (file-system
     (mount-point mount-point)
     (device tag)
@@ -282,7 +275,6 @@ AcceptEnv *\n")))
     (locale "en_US.utf8")
     (timezone "Europe/Berlin")
     (kernel linux-microvm)
-    ;; Name the NIC eth0, it has no PCI slot to name it after.
     (kernel-arguments (list "net.ifnames=0"))
     (initrd-modules '())
     (firmware '())
@@ -295,10 +287,11 @@ AcceptEnv *\n")))
                           (type "tmpfs")
                           (options "mode=755")
                           (check? #f))
-                        (virtiofs "store" "/gnu/store"
-                                  #:read-only? #t #:needed-for-boot? #t)
-                        (virtiofs "work" "/work")
-                        (virtiofs "home" "/home")
+                        (virtiofs-file-system "store" "/gnu/store"
+                                              #:read-only? #t
+                                              #:needed-for-boot? #t)
+                        (virtiofs-file-system "work" "/work")
+                        (virtiofs-file-system "home" "/home")
                         %pseudo-terminal-file-system
                         %shared-memory-file-system))
     (services %microvm-base-services)))

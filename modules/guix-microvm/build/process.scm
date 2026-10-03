@@ -1,0 +1,78 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
+
+(define-module (guix-microvm build process)
+  #:use-module (ice-9 match)
+  #:use-module (srfi srfi-9)
+  #:use-module (srfi srfi-26)
+  #:use-module (guix-microvm build error)
+  #:export (null-port
+            wait-for-exit
+            child-alive?
+            call-with-process
+            server
+            server-program
+            server-socket
+            socket-file
+            call-with-servers))
+
+(define %null-port
+  (delay (open-file "/dev/null" "r+")))
+
+(define (null-port)
+  (force %null-port))
+
+(define (exit-status status)
+  (or (status:exit-val status)
+      (+ 128 (status:term-sig status))))
+
+(define (wait-for-exit pid)
+  (exit-status (cdr (waitpid pid))))
+
+(define (child-alive? pid)
+  (match (waitpid pid WNOHANG)
+    ((0 . _) #t)
+    (_ #f)))
+
+(define* (call-with-process program args proc
+                            #:key (error (current-error-port)))
+  "Start PROGRAM with ARGS, stderr to ERROR, and call PROC with its PID.
+Stop it when PROC returns or exits."
+  (let ((pid (spawn program (cons program args)
+                    #:input (null-port) #:error error)))
+    (dynamic-wind
+      (const #t)
+      (cut proc pid)
+      (lambda ()
+        (false-if-exception (kill pid SIGTERM))
+        (false-if-exception (waitpid pid))))))
+
+;; A program that is up once it has created its socket.
+(define-record-type <server>
+  (server program arguments socket)
+  server?
+  (program   server-program)
+  (arguments server-arguments)
+  (socket    server-socket))
+
+(define (socket-file directory name)
+  (string-append directory "/" name ".sock"))
+
+(define (wait-for-socket file pid)
+  (let loop ()
+    (unless (file-exists? file)
+      (unless (child-alive? pid)
+        (fail "no ~a, the program serving it exited" file))
+      (usleep 100000)
+      (loop))))
+
+(define (call-with-servers servers thunk)
+  "Start SERVERS in order, call THUNK once all are up, and stop them when it
+returns or exits."
+  (match servers
+    (() (thunk))
+    ((first rest ...)
+     (call-with-process (server-program first) (server-arguments first)
+       (lambda (pid)
+         (wait-for-socket (server-socket first) pid)
+         (call-with-servers rest thunk))))))

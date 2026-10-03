@@ -1,19 +1,16 @@
 # guix-microvm
-Run commands in throwaway Guix System VMs, one project at a time.  The VM
-sees the project at `/work`, its own home and the packages of the
-project's `manifest.scm`, nothing else of the host.
+Runs commands in a Guix System VM per project.  The VM sees the project at
+`/work`, its own home and the packages of `manifest.scm`.  Existing `.git`
+directories appear empty and `.git` files are read-only.  The VM can still
+create a new `.git`, whose hooks Git on the host would run.
 
 ## Requirements
-- x86_64 with `/dev/kvm` and `/dev/vhost-vsock` (modules `kvm_intel` or
-  `kvm_amd`, and `vhost_vsock`)
+- x86_64 with `/dev/kvm` and `/dev/vhost-vsock`
 - unprivileged user namespaces
-- Landlock, which confines QEMU (`qemu-locked` from the sagittarius
-  channel)
+- Landlock
 - a Wayland session for graphical VMs
 
 ## Installation
-Add the channel to `~/.config/guix/channels.scm` and run `guix pull`:
-
 ```scheme
 (cons (channel
         (name 'guix-microvm)
@@ -22,44 +19,31 @@ Add the channel to `~/.config/guix/channels.scm` and run `guix pull`:
       %default-channels)
 ```
 
-Or, from a checkout:
+From a checkout:
 
 ```
-export GUILE_LOAD_PATH=$PWD/modules
-guix time-machine -C channels-lock.scm -- microvm --help
+GUILE_LOAD_PATH=$PWD/modules guix time-machine -C channels-lock.scm -- microvm
 ```
 
 ## Usage
 ```
-cd ~/src/project
 guix microvm                            # login shell in /work
 guix microvm -- make check              # run a command
 guix microvm -p 3000 -- npm run dev     # forward localhost:3000
-guix microvm --stateless -- make check  # keep no home, no changes to /work
-guix microvm --vm=claude-vm -- claude   # Claude Code
-guix microvm --vm=librewolf-vm          # LibreWolf on the host's display
+guix microvm --stateless -- make check  # discard home and changes to /work
+guix microvm --vm=claude-vm -- claude
+guix microvm --vm=librewolf-vm
+guix microvm --allow                    # allow new or changed project files
 ```
 
-`vm.scm` and `manifest.scm` are looked up in the current directory and its
-parents, like with `guix shell`, and run on the host.  As the VM can change
-them, `guix microvm` refuses new or changed ones until you review them and
-allow them:
-
-```
-guix microvm --allow
-```
-
-### manifest.scm
-The packages available in the VM:
+`vm.scm` and `manifest.scm` are searched in the current directory and its
+parents.  They run on the host, so they must be allowed after every change.
 
 ```scheme
+;; manifest.scm
 (specifications->manifest (list "node" "python"))
-```
 
-### vm.scm
-The VM, if not the default one:
-
-```scheme
+;; vm.scm
 (use-modules (guix-microvm vms claude))
 
 (microvm
@@ -68,60 +52,39 @@ The VM, if not the default one:
   (ports '(3000)))
 ```
 
-Fields: `operating-system` (inheriting `%base-vm`), `command`, `wayland?`,
-`stateless?`, `usb?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
+`microvm` fields: `operating-system`, `command`, `wayland?`, `stateless?`,
+`usb?`, `network?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
 
-The system needs `microvm-guest-service-type`, part of
-`%microvm-base-services`.  The launcher reads its configuration: `user`,
-`uid`, `gid`, `ssh-port`, `network`, `name-server`.
-
-```scheme
-(modify-services %microvm-base-services
-  (microvm-guest-service-type
-   config => (microvm-guest-configuration
-               (inherit config)
-               (user "dev"))))
-```
+The system needs `microvm-guest-service-type` from `%microvm-base-services`.
+Its fields are `user`, `uid`, `gid`, `ssh-port`, `network` and
+`name-server`.
 
 ### Claude Code
-Log in once for all projects:
-
 ```
 guix microvm --vm=claude-vm -- claude setup-token
 mkdir -p ~/.local/share/guix-microvm/claude/secrets
 echo TOKEN > ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
 ```
 
-### USB devices
-A VM with `usb?`, like `librewolf-vm`, takes USB devices of the host while it
-runs, by their hexadecimal vendor and product IDs, which `lsusb` shows.  The
-host lacks a device until it is detached or the VM exits:
+### USB
+VMs with `usb?` can take a host device until it is detached or the VM
+exits.  The device needs a udev rule that gives you access.
 
 ```
-guix microvm usb attach librewolf 1050   # a YubiKey, for WebAuthn
+guix microvm usb attach librewolf 1050
 guix microvm usb detach librewolf 1050
 ```
 
-QEMU opens the device as you, which a udev rule on the host allows:
-
-```scheme
-(udev-rules-service 'yubikey-usb
-                    (udev-rule "90-yubikey-usb.rules" "\
-SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1050\", MODE=\"0660\", GROUP=\"plugdev\"\n"))
-```
-
 ## Files
-- `~/.local/share/guix-microvm/NAME/PROJECT/`: the VM's home, per project
-- `~/.local/share/guix-microvm/NAME/PROJECT.log`: its console output
-- `~/.local/share/guix-microvm/NAME/secrets/`: variables in `secrets`
+- `~/.local/share/guix-microvm/NAME/PROJECT/`: home
+- `~/.local/share/guix-microvm/NAME/PROJECT.log`: console log
+- `~/.local/share/guix-microvm/NAME/secrets/`: values of `secrets`
 
-With `--stateless` or `(stateless? #t)`, the home, the log and the SSH key
-live in `$XDG_RUNTIME_DIR` until the VM exits.  Changes to `/work` go to an
-overlay in the VM's memory; don't change the project on the host meanwhile.
+Stateless VMs keep home and log in `$XDG_RUNTIME_DIR` until they exit.
 
 ## Development
 ```
-make check     # evaluate all VMs, run the unit tests
-make check-vm  # boot VMs and test the launcher (needs KVM)
+make check     # evaluate VMs, unit tests
+make check-vm  # boot VMs
 make update    # update channels-lock.scm
 ```

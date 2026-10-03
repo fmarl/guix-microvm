@@ -26,13 +26,11 @@
             attach-usb!
             detach-usb!))
 
-;;; Running VMs
-
 (define-record-type <running-vm>
   (running-vm name directory usb? qmp-socket)
   running-vm?
   (name       running-vm-name)
-  (directory  running-vm-directory)     ;the project's
+  (directory  running-vm-directory)
   (usb?       running-vm-usb?)
   (qmp-socket running-vm-qmp-socket))
 
@@ -52,14 +50,11 @@
     (_ #f)))
 
 (define* (running-vms #:optional (runtime (runtime-directory)))
-  "Return the VMs running from RUNTIME."
   (filter-map (lambda (name)
                 (directory->running-vm (string-append runtime "/" name)))
               (or (scandir runtime
                            (cut string-prefix? %vm-directory-prefix <>))
                   '())))
-
-;;; QMP
 
 (define (qmp-receive port)
   "Return the next message on PORT, skipping events."
@@ -100,14 +95,15 @@ command, with optional arguments, and returns the result."
         (proc (cut qmp-execute port <> <...>)))
       (cut close-port port))))
 
-;;; USB
+(define (usb-id-part? value)
+  (and (exact-integer? value) (<= 0 value #xffff)))
 
 (define (string->usb-id str)
   "Parse STR, VENDOR or VENDOR:PRODUCT in hexadecimal, into a pair.  The
 product is #f if left out.  Return #f if STR is invalid."
   (match (map (cut string->number <> 16) (string-split str #\:))
-    (((? integer? vendor)) (cons vendor #f))
-    (((? integer? vendor) (? integer? product)) (cons vendor product))
+    (((? usb-id-part? vendor)) (cons vendor #f))
+    (((? usb-id-part? vendor) (? usb-id-part? product)) (cons vendor product))
     (_ #f)))
 
 (define (usb-id->string id)
@@ -163,6 +159,9 @@ as a pair, or #f for an interface."
 
 (define (check-usb-device id)
   "Raise an error unless the USB device ID is plugged in and accessible."
+  (define (accessible? file)
+    (access? file (logior R_OK W_OK)))
+
   (match (present-usb-devices id)
     (()
      (raise-exception
@@ -170,7 +169,7 @@ as a pair, or #f for an interface."
                          (usb-id->string id))))
     (files
      (for-each (lambda (file)
-                 (unless (access? file (logior R_OK W_OK))
+                 (unless (accessible? file)
                    (raise-exception
                     (formatted-message (G_ "~a is not accessible: a udev \
 rule can give you access to it")
