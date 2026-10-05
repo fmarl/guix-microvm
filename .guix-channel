@@ -5,4 +5,9 @@
   (channel
    (name sagittarius)
    (url "https://codeberg.org/fmarl/sagittarius")
-   (branch "main"))))
+   (branch "main")
+   (introduction
+    (channel-introduction
+     (version 0)
+     (commit "c2302ace8d0b0d16a01668399889c9d796af5777")
+     (signer "F2E3 8B47 808B AF7B 81D5  B27F 52C5 7B54 89B5 819D"))))))
