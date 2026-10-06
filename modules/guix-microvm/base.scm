@@ -1,6 +1,7 @@
 (define-module (guix-microvm base)
   #:use-module (srfi srfi-1)
   #:use-module (guix gexp)
+  #:use-module (guix modules)
   #:use-module (guix records)
   #:use-module (gnu)
   #:use-module (gnu services admin)
@@ -72,16 +73,12 @@
                  (number->string (microvm-guest-configuration-uid config))))
 
 (define (kernel-option name)
-  "Return a gexp for VALUE of NAME=VALUE on the kernel command line, or #f."
-  #~(let ((prefix #$(string-append name "=")))
-      (any (lambda (arg)
-             (and (string-prefix? prefix arg)
-                  (string-drop arg (string-length prefix))))
-           (string-tokenize
-            (call-with-input-file "/proc/cmdline" get-string-all)))))
+  "Return a gexp for the value of NAME on the kernel command line, or #f."
+  (with-imported-modules (source-module-closure '((gnu build linux-boot)))
+    #~(find-long-option #$name (linux-command-line))))
 
 (define %kernel-option-modules
-  `((srfi srfi-1) (ice-9 textual-ports) ,@%default-modules))
+  `((gnu build linux-boot) ,@%default-modules))
 
 (define (ssh-vsock-service port)
   "Return the service forwarding vsock PORT to the SSH daemon."
