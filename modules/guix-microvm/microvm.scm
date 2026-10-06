@@ -16,6 +16,7 @@
   #:use-module (gnu packages version-control)
   #:use-module (gnu services)
   #:use-module (gnu services base)
+  #:use-module ((gnu services configuration) #:select (list-of))
   #:use-module (gnu system)
   #:use-module (gnu system file-systems)
   #:use-module (sagittarius locked virtualization)
@@ -34,11 +35,35 @@
             microvm-memory-size
             microvm-cpu-count))
 
+(define (validator field predicate expected)
+  "Return a sanitizer that returns values satisfying PREDICATE and raises an
+error naming FIELD and EXPECTED for others."
+  (lambda (value)
+    (if (predicate value)
+        value
+        (raise-exception
+         (formatted-message (G_ "~a: expected ~a, got ~s")
+                            field expected value)))))
+
+
+(define (port-number? value)
+  (and (exact-integer? value) (<= 1 value 65535)))
+
+(define (forwarded-port? value)
+  (match value
+    (((? port-number?) . (? port-number?)) #t)
+    (port (port-number? port))))
+
+(define (positive-integer? value)
+  (and (exact-integer? value) (positive? value)))
+
 (define-record-type* <microvm> microvm make-microvm
   microvm?
   (operating-system microvm-operating-system) ;<operating-system>
   (command          microvm-command           ;list of strings
-                    (default '()))
+                    (default '())
+                    (sanitize (validator 'command (list-of string?)
+                                         "a list of strings")))
   (wayland?         microvm-wayland?          ;Boolean
                     (default #f))
   (stateless?       microvm-stateless?        ;Boolean
@@ -46,15 +71,23 @@
   (manifest         microvm-manifest          ;<manifest> | #f
                     (default #f))
   (ports            microvm-ports             ;list of PORT | (HOST . GUEST)
-                    (default '()))
+                    (default '())
+                    (sanitize (validator 'ports (list-of forwarded-port?)
+                                         "a list of PORT or (HOST . GUEST)")))
   (secrets          microvm-secrets           ;list of variable names
-                    (default '()))
+                    (default '())
+                    (sanitize (validator 'secrets (list-of string?)
+                                         "a list of variable names")))
   (usb?             microvm-usb?              ;Boolean
                     (default #f))
   (memory-size      microvm-memory-size       ;integer (MiB)
-                    (default 4096))
+                    (default 4096)
+                    (sanitize (validator 'memory-size positive-integer?
+                                         "a positive integer")))
   (cpu-count        microvm-cpu-count         ;integer
-                    (default 4)))
+                    (default 4)
+                    (sanitize (validator 'cpu-count positive-integer?
+                                         "a positive integer"))))
 
 (define (guest-configuration os)
   "Return the 'microvm-guest-service-type' configuration of OS."
