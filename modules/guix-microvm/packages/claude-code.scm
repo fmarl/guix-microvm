@@ -8,10 +8,9 @@
   #:use-module (guix build-system copy)
   #:use-module ((guix licenses) #:prefix license:)
   #:use-module (gnu packages base)
-  #:use-module (gnu packages bash)
-  #:export (claude-code))
+  #:use-module (gnu packages bash))
 
-(define claude-code
+(define-public claude-code
   (package
     (name "claude-code")
     (version "2.1.286")
