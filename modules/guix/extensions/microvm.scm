@@ -18,7 +18,7 @@
   #:use-module (guix-microvm microvm)
   #:use-module (guix-microvm control)
   #:use-module ((guix-microvm build microvm)
-                #:select (contains-home? wait-for-exit))
+                #:select (home-directory contains-home? wait-for-exit))
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
   #:use-module ((rnrs bytevectors) #:select (string->utf8))
@@ -303,7 +303,7 @@ status."
       (allow-project! project))
     (when (or vm-file manifest-file)
       (ensure-allowed project))
-    (when (and (contains-home? directory (canonicalize-path (getenv "HOME")))
+    (when (and (contains-home? directory (home-directory))
                (not (assoc-ref opts 'share-home?)))
       (leave (G_ "not sharing ~a, which contains the home directory, \
 without --share-home~%")

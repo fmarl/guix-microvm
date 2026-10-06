@@ -11,7 +11,8 @@
   #:use-module (srfi srfi-34)
   #:use-module (srfi srfi-71)
   #:use-module (web uri)
-  #:export (contains-home?
+  #:export (home-directory
+            contains-home?
             runtime-directory
             %vm-directory-prefix
             vm-info-file
@@ -78,6 +79,9 @@ command they specify."
   (if (directory-exists? directory)
       (canonicalize-path directory)
       (fail "~a is not a directory" directory)))
+
+(define (home-directory)
+  (canonicalize-path (getenv "HOME")))
 
 (define (contains-home? directory home)
   "Return true if DIRECTORY is HOME or one of its parents."
@@ -543,7 +547,7 @@ process."
 (define (check-host! directory share-home? name waypipe)
   "Fail unless the host can run the VM NAME sharing DIRECTORY."
   (when (and (not share-home?)
-             (contains-home? directory (canonicalize-path (getenv "HOME"))))
+             (contains-home? directory (home-directory)))
     (fail "not sharing ~a, which contains the home directory, without \
 --share-home" directory))
   (when (and waypipe (not (getenv "WAYLAND_DISPLAY")))
@@ -592,7 +596,7 @@ gives it a USB controller, for 'guix microvm usb' to attach host devices to."
               (stateless? (or stateless? (member "--stateless" flags)))
               (directory (existing-directory directory))
               (command (if (null? command) default-command command))
-              (data (data-directory (canonicalize-path (getenv "HOME"))))
+              (data (data-directory (home-directory)))
               (memory (getenv-number "VM_MEMORY" memory-size))
               (cpus (getenv-number "VM_CPUS" cpu-count))
               (boot-timeout (getenv-number "VM_BOOT_TIMEOUT" 120))
