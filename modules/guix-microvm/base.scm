@@ -4,6 +4,7 @@
   #:use-module (guix records)
   #:use-module (gnu)
   #:use-module (gnu services admin)
+  #:use-module (gnu services configuration)
   #:use-module (gnu services shepherd)
   #:use-module (gnu services ssh)
   #:use-module (gnu packages base)
@@ -13,12 +14,12 @@
   #:use-module (guix-microvm kernel)
   #:export (microvm-guest-configuration
             microvm-guest-configuration?
-            microvm-guest-user
-            microvm-guest-uid
-            microvm-guest-gid
-            microvm-guest-ssh-port
-            microvm-guest-network
-            microvm-guest-name-server
+            microvm-guest-configuration-user
+            microvm-guest-configuration-uid
+            microvm-guest-configuration-gid
+            microvm-guest-configuration-ssh-port
+            microvm-guest-configuration-network
+            microvm-guest-configuration-name-server
             microvm-guest-runtime-directory
             microvm-guest-service-type
             %microvm-base-services
@@ -33,27 +34,42 @@
                     (destination "default")
                     (gateway "10.0.2.2"))))))
 
-(define-record-type* <microvm-guest-configuration>
-  microvm-guest-configuration make-microvm-guest-configuration
-  microvm-guest-configuration?
-  (user     microvm-guest-user            ;string
-            (default "user"))
-  (uid      microvm-guest-uid             ;integer
-            (default 1000))
-  (gid      microvm-guest-gid             ;integer
-            (default 1000))
-  ;; Ports below 1024 need CAP_NET_BIND_SERVICE, which socat, as nobody,
-  ;; lacks.
-  (ssh-port microvm-guest-ssh-port        ;integer
-            (default 2222))
-  ;; One address and route, as passt serves it.
-  (network  microvm-guest-network         ;<static-networking>
-            (default %default-network))
-  (name-server microvm-guest-name-server  ;string
-               (default "10.0.2.3")))
+;; Ports below 1024 need CAP_NET_BIND_SERVICE, which socat, as nobody,
+;; lacks.
+(define (unprivileged-port? value)
+  (and (exact-integer? value) (<= 1024 value 65535)))
+
+;; passt serves one address and route.
+(define (passt-network? value)
+  (and (static-networking? value)
+       (= 1 (length (static-networking-addresses value)))
+       (= 1 (length (static-networking-routes value)))))
+
+(define-configuration microvm-guest-configuration
+  (user
+   (string "user")
+   "Name of the account that runs commands.")
+  (uid
+   (integer 1000)
+   "User ID of @code{user}.  The launcher maps it to the host user on
+@file{/work} and the home directory.")
+  (gid
+   (integer 1000)
+   "Group ID of @code{user}.")
+  (ssh-port
+   (unprivileged-port 2222)
+   "vsock port on which the launcher reaches the SSH daemon.")
+  (network
+   (passt-network %default-network)
+   "A @code{<static-networking>} with one address and one route.")
+  (name-server
+   (string "10.0.2.3")
+   "Address to which the guest sends DNS queries; passt forwards them.")
+  (no-serialization))
 
 (define (microvm-guest-runtime-directory config)
-  (string-append "/run/user/" (number->string (microvm-guest-uid config))))
+  (string-append "/run/user/"
+                 (number->string (microvm-guest-configuration-uid config))))
 
 (define (kernel-option name)
   "Return a gexp for VALUE of NAME=VALUE on the kernel command line, or #f."
@@ -153,7 +169,7 @@
   (list (udev-rule "90-guix-microvm.rules"
                    (format #f "SUBSYSTEM==\"hidraw\", MODE=\"0660\", \
 GROUP=\"~a\"~%"
-                           (microvm-guest-user config)))))
+                           (microvm-guest-configuration-user config)))))
 
 (define (guest-accounts config)
   (match-record config <microvm-guest-configuration> (user uid gid)

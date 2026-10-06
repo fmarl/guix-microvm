@@ -5,6 +5,7 @@
              (guix-microvm control)
              (guix-microvm microvm)
              (gnu services)
+             ((gnu services base) #:select (static-networking))
              ((gnu system) #:select (operating-system))
              ((guix build utils) #:select (mkdir-p delete-file-recursively))
              ((guix diagnostics)
@@ -329,8 +330,8 @@ sleep."
   '("--address" "10.0.2.15" "--netmask" "24" "--gateway" "10.0.2.2"
     "--dns-forward" "10.0.2.3")
   (let ((guest (guest-configuration %base-vm)))
-    (passt-network-options (microvm-guest-network guest)
-                           (microvm-guest-name-server guest))))
+    (passt-network-options (microvm-guest-configuration-network guest)
+                           (microvm-guest-configuration-name-server guest))))
 
 ;;; Guest
 
@@ -347,8 +348,9 @@ sleep."
                                   (user "dev")
                                   (uid 1001)
                                   (ssh-port 2223)))))))))
-    (list (microvm-guest-user guest) (microvm-guest-uid guest)
-          (microvm-guest-ssh-port guest))))
+    (list (microvm-guest-configuration-user guest)
+          (microvm-guest-configuration-uid guest)
+          (microvm-guest-configuration-ssh-port guest))))
 
 (test-assert "guest-configuration, without the service"
   (guard (error ((formatted-message? error) #t))
@@ -360,6 +362,21 @@ sleep."
                                            microvm-guest-service-type))
                                     %microvm-base-services))))
     #f))
+
+(test-equal "microvm-guest-configuration, invalid fields"
+  '(#t #t #t #f)
+  (map (lambda (thunk)
+         (guard (error (#t #t))
+           (thunk)
+           #f))
+       (list (lambda () (microvm-guest-configuration (ssh-port 22)))
+             (lambda () (microvm-guest-configuration (uid "1000")))
+             (lambda ()
+               (microvm-guest-configuration
+                 (network (static-networking
+                            (addresses '())
+                            (routes '())))))
+             (lambda () (microvm-guest-configuration (ssh-port 2223))))))
 
 ;;; Processes
 

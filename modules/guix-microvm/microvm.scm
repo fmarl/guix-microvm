@@ -153,8 +153,9 @@ and waypipe for Wayland."
 (define (microvm-network-options vm guest)
   "Return passt options for the network of GUEST, VM's guest configuration,
 and for VM's ports."
-  (append (passt-network-options (microvm-guest-network guest)
-                                 (microvm-guest-name-server guest))
+  (append (passt-network-options
+           (microvm-guest-configuration-network guest)
+           (microvm-guest-configuration-name-server guest))
           (append-map passt-port-options (microvm-ports vm))))
 
 (define (microvm-launcher vm)
@@ -186,10 +187,10 @@ shares DIR at /work and runs COMMAND there."
             #:profile #$project-profile
             #:memory-size #$(microvm-memory-size vm)
             #:cpu-count #$(microvm-cpu-count vm)
-            #:user #$(microvm-guest-user guest)
-            #:uid #$(microvm-guest-uid guest)
-            #:gid #$(microvm-guest-gid guest)
-            #:ssh-port #$(microvm-guest-ssh-port guest)
+            #:user #$(microvm-guest-configuration-user guest)
+            #:uid #$(microvm-guest-configuration-uid guest)
+            #:gid #$(microvm-guest-configuration-gid guest)
+            #:ssh-port #$(microvm-guest-configuration-ssh-port guest)
             #:network-options
             '#$(microvm-network-options vm guest)
             #:secrets '#$(microvm-secrets vm)
