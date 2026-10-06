@@ -12,18 +12,22 @@
   #:use-module ((guix utils)
                 #:select (config-directory with-atomic-file-output))
   #:use-module ((guix base16) #:select (bytevector->base16-string))
-  #:use-module ((gcrypt hash) #:select (sha256 file-sha256))
+  #:use-module ((gcrypt hash) #:select (sha256))
   #:use-module (gnu system)
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
   #:use-module (guix-microvm control)
   #:use-module ((guix-microvm build microvm)
                 #:select (home-directory contains-home? wait-for-exit))
+  #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
+  #:use-module (ice-9 eval-string)
+  #:use-module ((ice-9 exceptions) #:select (exception-kind exception-args))
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
-  #:use-module ((rnrs bytevectors) #:select (string->utf8))
+  #:use-module ((rnrs bytevectors) #:select (string->utf8 utf8->string))
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
+  #:use-module (srfi srfi-34)
   #:use-module (srfi srfi-37)
   #:use-module (srfi srfi-71)
   #:export (guix-microvm))
@@ -127,13 +131,16 @@ by name."
                                        string<?)
                                  ", ")))))
 
+(define %project-file-names
+  '("vm.scm" "manifest.scm"))
+
 (define (project-directory)
   "Return the nearest directory, from the current one up, that contains
 vm.scm or manifest.scm, or #f."
   (let loop ((directory (getcwd)))
     (cond ((any (lambda (file)
                   (file-exists? (string-append directory "/" file)))
-                '("vm.scm" "manifest.scm"))
+                %project-file-names)
            directory)
           ((string=? directory "/") #f)
           (else (loop (dirname directory))))))
@@ -141,21 +148,36 @@ vm.scm or manifest.scm, or #f."
 (define* (allowed-file #:key ensure?)
   (string-append (config-directory #:ensure? ensure?) "/microvm-allowed"))
 
-(define (project-digest project)
-  "Return a digest of vm.scm and manifest.scm in PROJECT, which changes when
-either changes, appears or disappears."
+(define (file-bytes file)
+  (match (call-with-input-file file get-bytevector-all #:binary #t)
+    ((? eof-object?) #vu8())
+    (bytes bytes)))
+
+;; Read once: the VM can change the files between check and load.
+(define (read-project project)
+  "Return vm.scm and manifest.scm of PROJECT as an alist of names and
+bytevectors, leaving out missing ones."
+  (if project
+      (filter-map (lambda (name)
+                    (let ((file (string-append project "/" name)))
+                      (and (file-exists? file)
+                           (cons name (file-bytes file)))))
+                  %project-file-names)
+      '()))
+
+(define (project-digest contents)
+  "Return a digest of CONTENTS, as returned by 'read-project'."
   (bytevector->base16-string
    (sha256
     (string->utf8
      (string-join
       (map (lambda (name)
-             (let ((file (string-append project "/" name)))
-               (if (file-exists? file)
-                   (string-append name " "
-                                  (bytevector->base16-string
-                                   (file-sha256 file)))
-                   name)))
-           '("vm.scm" "manifest.scm"))
+             (match (assoc-ref contents name)
+               (#f name)
+               (bytes (string-append name " "
+                                     (bytevector->base16-string
+                                      (sha256 bytes))))))
+           %project-file-names)
       "\n")))))
 
 (define (allowed-project line)
@@ -175,7 +197,7 @@ either changes, appears or disappears."
                                 #\newline)))
     (const '())))
 
-(define (allow-project! project)
+(define (allow-project! project contents)
   (unless project
     (leave (G_ "no vm.scm or manifest.scm to allow~%")))
   (let ((others (alist-delete project (allowed-projects))))
@@ -184,26 +206,26 @@ either changes, appears or disappears."
         (for-each (match-lambda
                     ((directory . digest)
                      (format port "~a ~a~%" digest directory)))
-                  (alist-cons project (project-digest project) others))))))
+                  (alist-cons project (project-digest contents) others))))))
 
-(define (project-allowed? project)
+(define (project-allowed? project contents)
   (equal? (assoc-ref (allowed-projects) project)
-          (project-digest project)))
+          (project-digest contents)))
 
-(define (project-file project name)
-  "Return the file NAME in PROJECT if it exists, or #f."
-  (let ((file (and project (string-append project "/" name))))
-    (and file (file-exists? file) file)))
+(define (project-file project contents name)
+  "Return NAME in PROJECT paired with its contents, or #f."
+  (and=> (assoc-ref contents name)
+         (cut cons (string-append project "/" name) <>)))
 
-(define (project-files opts project)
-  "Return PROJECT's vm.scm, unless OPTS name a predefined microvm, and
-manifest.scm, each or #f."
+(define (project-files opts project contents)
+  "Return vm.scm, unless OPTS name a predefined microvm, and manifest.scm, as
+'project-file' does."
   (values (and (not (assoc-ref opts 'vm))
-               (project-file project "vm.scm"))
-          (project-file project "manifest.scm")))
+               (project-file project contents "vm.scm"))
+          (project-file project contents "manifest.scm")))
 
-(define (ensure-allowed project)
-  (unless (project-allowed? project)
+(define (ensure-allowed project contents)
+  (unless (project-allowed? project contents)
     (report-error (G_ "not loading vm.scm and manifest.scm from '~a': \
 they are new or changed~%")
                   project)
@@ -211,13 +233,31 @@ they are new or changed~%")
 Review them, then run @command{guix microvm --allow}."))
     (exit 1)))
 
+(define (eval-file file bytes modules)
+  "Evaluate BYTES, read from FILE, in a new module using MODULES.  Return the
+last value."
+  ;; Guix conditions and 'leave' go on to 'with-error-handling'.
+  (guard (error ((not (memq (exception-kind error) '(quit %exception)))
+                 (report-error (G_ "failed to load '~a':~%") file)
+                 (print-exception (current-error-port) #f
+                                  (exception-kind error)
+                                  (exception-args error))
+                 (exit 1)))
+    (eval-string (utf8->string bytes)
+                 #:module (make-user-module modules)
+                 #:file file
+                 #:compile? #t)))
+
 (define (load-object file kind valid? modules)
-  "Load FILE in MODULES and return its value, a KIND satisfying VALID?."
-  (info (G_ "loading ~a from '~a'...~%") kind file)
-  (let ((object (load* file modules)))
-    (if (valid? object)
-        object
-        (leave (G_ "~a: expected a ~a~%") file kind))))
+  "Evaluate FILE, from 'project-file', in MODULES.  Return the value, failing
+unless VALID? says it is a KIND."
+  (match file
+    ((name . bytes)
+     (info (G_ "loading ~a from '~a'...~%") kind name)
+     (let ((object (eval-file name bytes modules)))
+       (if (valid? object)
+           object
+           (leave (G_ "~a: expected a ~a~%") name kind))))))
 
 (define (load-microvm file)
   (load-object file "microvm" microvm?
@@ -290,12 +330,13 @@ file name, unless OPTS ask for a dry run."
 status."
   (let* ((opts command (parse-arguments args))
          (project (project-directory))
-         (vm-file manifest-file (project-files opts project))
+         (contents (read-project project))
+         (vm-file manifest-file (project-files opts project contents))
          (directory (or project (getcwd))))
     (when (assoc-ref opts 'allow?)
-      (allow-project! project))
+      (allow-project! project contents))
     (when (or vm-file manifest-file)
-      (ensure-allowed project))
+      (ensure-allowed project contents))
     (when (and (contains-home? directory (home-directory))
                (not (assoc-ref opts 'share-home?)))
       (leave (G_ "not sharing ~a, which contains the home directory, \

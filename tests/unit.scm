@@ -16,6 +16,7 @@
              (ice-9 rdelim)
              (ice-9 threads)
              (ice-9 textual-ports)
+             ((rnrs bytevectors) #:select (string->utf8))
              (srfi srfi-1)
              (srfi srfi-26)
              (srfi srfi-34)
@@ -42,9 +43,9 @@
   process-exists? usb-id-matches? usb-host-arguments running-vm)
 
 (define-private (guix extensions microvm)
-  string->port launcher-flags project-directory project-digest
+  string->port launcher-flags project-directory read-project project-digest
   allowed-project allowed-projects allow-project! project-allowed?
-  project-files)
+  project-file project-files eval-file load-object)
 
 (define-syntax-rule (values->list exp)
   (call-with-values (lambda () exp) list))
@@ -63,7 +64,8 @@ if it returns."
 (define (quietly thunk)
   (call-with-port (open-file "/dev/null" "w")
     (lambda (null)
-      (parameterize ((guix-warning-port null))
+      (parameterize ((guix-warning-port null)
+                     (current-warning-port null))
         (with-error-to-port null thunk)))))
 
 (define (with-environment variables thunk)
@@ -560,6 +562,15 @@ gives the commands received.  Each reply follows an event; the command
        (sub (string-append project "/a/b"))
        (manifest (string-append project "/manifest.scm"))
        (vm (string-append project "/vm.scm")))
+  (define (allowed?)
+    (project-allowed? project (read-project project)))
+
+  (define (allow!)
+    (allow-project! project (read-project project)))
+
+  (define (digest)
+    (project-digest (read-project project)))
+
   (mkdir-p sub)
   (write-file manifest "1")
 
@@ -571,39 +582,65 @@ gives the commands received.  Each reply follows an event; the command
         project-directory
         (cut chdir cwd))))
 
+  (test-equal "read-project"
+    '((("manifest.scm" . #vu8(49))) ())
+    (list (read-project project) (read-project #f)))
+
   (test-equal "project-files"
-    `((#f ,manifest) (,vm ,manifest))
+    `((#f (,manifest . #vu8(49)))
+      ((,vm . #vu8(118)) (,manifest . #vu8(49))))
     (begin
       (write-file vm "v")
-      (map (lambda (opts)
-             (values->list (project-files opts project)))
-           '(((vm . "claude-vm")) ()))))
+      (let ((contents (read-project project)))
+        (map (lambda (opts)
+               (values->list (project-files opts project contents)))
+             '(((vm . "claude-vm")) ())))))
+
+  (test-equal "load-object evaluates the contents read, not the file"
+    2
+    (begin
+      (write-file manifest "(+ 1 1)")
+      (let ((file (project-file project (read-project project)
+                                "manifest.scm")))
+        (write-file manifest "(exit 9)")
+        (quietly
+         (lambda ()
+           (load-object file "number" number? '()))))))
+
+  (test-equal "eval-file, errors"
+    '(1 1)
+    (map (lambda (code)
+           (exit-code
+            (lambda ()
+              (quietly
+               (lambda ()
+                 (eval-file manifest (string->utf8 code) '()))))))
+         '("(" "unbound-variable")))
 
   (with-environment `(("XDG_CONFIG_HOME" . ,(string-append tmp "/config")))
     (lambda ()
       (test-equal "allow-project!"
         '(#f #t #f #t)
-        (let* ((before (project-allowed? project))
-               (_ (allow-project! project))
-               (allowed (project-allowed? project)))
+        (let* ((before (allowed?))
+               (_ (allow!))
+               (allowed (allowed?)))
           (write-file manifest "2")
-          (let ((changed (project-allowed? project)))
-            (allow-project! project)
-            (list before allowed changed (project-allowed? project)))))
+          (let ((changed (allowed?)))
+            (allow!)
+            (list before allowed changed (allowed?)))))
 
       (test-equal "allow-project! keeps the other projects"
         (sort (list project "/other") string<?)
         (begin
           (write-file (string-append tmp "/config/guix/microvm-allowed")
-                      (format #f "~a ~a~%digest /other~%"
-                              (project-digest project) project))
-          (allow-project! project)
+                      (format #f "~a ~a~%digest /other~%" (digest) project))
+          (allow!)
           (sort (map car (allowed-projects)) string<?)))
 
       (test-assert "project-digest changes when a file disappears"
-        (let ((digest (project-digest project)))
+        (let ((before (digest)))
           (delete-file vm)
-          (not (equal? digest (project-digest project))))))))
+          (not (equal? before (digest))))))))
 
 (delete-file-recursively tmp)
 
