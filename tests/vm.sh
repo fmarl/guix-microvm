@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
+#
 # Boot VMs and test the launcher.
 # Needs /dev/kvm and /dev/vhost-vsock; the Wayland test, a Wayland session.
 #

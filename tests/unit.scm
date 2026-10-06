@@ -1,3 +1,6 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
+
 ;; Unit tests of the launcher and the extension, without a VM.
 
 (use-modules (guix-microvm build microvm)

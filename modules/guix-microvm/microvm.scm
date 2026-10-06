@@ -1,3 +1,6 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
+
 (define-module (guix-microvm microvm)
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
