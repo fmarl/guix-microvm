@@ -57,7 +57,7 @@
                     (default 4)))
 
 (define (guest-configuration os)
-  "Return the configuration of the microvm guest service of OS."
+  "Return the 'microvm-guest-service-type' configuration of OS."
   (match (find (lambda (service)
                  (eq? (service-kind service) microvm-guest-service-type))
                (operating-system-user-services os))
@@ -68,8 +68,8 @@
     (service (service-value service))))
 
 (define (passt-network-options network name-server)
-  "Return the options for passt to serve NETWORK, a <static-networking> with
-one address and route, and to answer DNS queries sent to NAME-SERVER."
+  "Return passt options to serve NETWORK, a <static-networking> with one
+address and route, and DNS at NAME-SERVER."
   (match (list (static-networking-addresses network)
                (static-networking-routes network))
     (((address) (route))
@@ -83,8 +83,8 @@ one address and route, and to answer DNS queries sent to NAME-SERVER."
          (G_ "the microvm network needs one address and route"))))))
 
 (define (passt-port-options port)
-  "Return the options for passt to forward PORT, a port number or a pair of
-host and guest port numbers, from the host's loopback to the guest."
+  "Return passt options to forward PORT, a number or a host and guest pair,
+from the host's loopback to the guest."
   (match port
     ((host . guest)
      (list "--tcp-ports" (format #f "127.0.0.1/~a:~a" host guest)))
@@ -92,7 +92,7 @@ host and guest port numbers, from the host's loopback to the guest."
      (list "--tcp-ports" (format #f "127.0.0.1/~a" port)))))
 
 (define (store-items objects)
-  "Return a file listing the store items OBJECTS refer to, recursively."
+  "Return a file listing the closure of OBJECTS."
   (let ((graphs (map (lambda (index)
                        (string-append "graph-" (number->string index)))
                      (iota (length objects)))))
@@ -141,26 +141,25 @@ host and guest port numbers, from the host's loopback to the guest."
            (apply execl program program args)))))))
 
 (define (microvm-profile vm)
-  "Return the profile of VM's manifest, or #f."
   (and=> (microvm-manifest vm)
          (lambda (manifest)
            (profile (content manifest)))))
 
 (define (microvm-store-roots vm os profile)
-  "Return the objects whose closures VM, running OS, sees in its store: OS,
-PROFILE, if any, and waypipe if VM is graphical."
+  "Return what the store of VM contains the closure of: OS, PROFILE if any,
+and waypipe for Wayland."
   (filter identity (list os profile (and (microvm-wayland? vm) waypipe))))
 
 (define (microvm-network-options vm guest)
-  "Return the options for passt to serve the network of GUEST, the
-configuration of VM's guest service, and forward VM's ports."
+  "Return passt options for the network of GUEST, VM's guest configuration,
+and for VM's ports."
   (append (passt-network-options (microvm-guest-network guest)
                                  (microvm-guest-name-server guest))
           (append-map passt-port-options (microvm-ports vm))))
 
 (define (microvm-launcher vm)
-  "Return the launcher of VM, run-NAME [DIR] [-- COMMAND...], which boots VM,
-shares DIR at /work and runs COMMAND in it, as described in README.md."
+  "Return the launcher of VM.  run-NAME [DIR] [-- COMMAND...] boots VM,
+shares DIR at /work and runs COMMAND there."
   (let* ((os (microvm-operating-system vm))
          (name (operating-system-host-name os))
          (root (file-system-device (operating-system-root-file-system os)))

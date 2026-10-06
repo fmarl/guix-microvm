@@ -38,8 +38,7 @@
                         1)))
 
 (define (call-with-launcher-errors thunk)
-  "Call THUNK, or report the launcher error it raises and return its exit
-status."
+  "Call THUNK.  On a launcher error, print it and return its exit status."
   (guard (error ((launcher-error? error)
                  (format (current-error-port) "~a~%"
                          (launcher-error-message error))
@@ -56,8 +55,7 @@ status."
                (fail "~a is not a number: ~a" name value)))))
 
 (define (parse-arguments args)
-  "Return the flags ARGS set, as a list of strings, and the directory and
-command they specify."
+  "Split ARGS into flags, directory and command, returned as three values."
   (match args
     (((and flag (or "--share-home" "--stateless")) rest ...)
      (let ((flags directory command (parse-arguments rest)))
@@ -90,8 +88,8 @@ command they specify."
       (string-prefix? (string-append directory "/") home)))
 
 (define (mount-store-items items root)
-  "Mount the store items listed in the file ITEMS on a tmpfs at ROOT.  This
-requires a mount namespace of one's own."
+  "Bind-mount the store items listed in ITEMS on a tmpfs at ROOT.  Needs a
+private mount namespace."
   (mount "none" root "tmpfs" 0 "mode=755")
   (for-each (lambda (item)
               (let ((target (string-append root "/" (basename item))))
@@ -102,8 +100,8 @@ requires a mount namespace of one's own."
             (string-tokenize (call-with-input-file items get-string-all))))
 
 (define (vm-files data tmp name directory stateless?)
-  "Return the home directory, console log and SSH key of the VM NAME sharing
-DIRECTORY: in DATA, or in TMP if STATELESS?."
+  "Return the home, console log and SSH key of VM NAME for DIRECTORY.  They
+are in DATA, or in TMP if STATELESS?."
   (if stateless?
       (values (string-append tmp "/home")
               (string-append tmp "/console.log")
@@ -114,17 +112,15 @@ DIRECTORY: in DATA, or in TMP if STATELESS?."
                 (string-append data "/ssh/id_ed25519")))))
 
 (define (data-directory home)
-  "Return the directory of the VMs' files, given the user's HOME."
   (string-append (getenv* "XDG_DATA_HOME" (string-append home "/.local/share"))
                  "/guix-microvm"))
 
 (define (secrets-directory data name)
-  "Return the directory of the secrets of the VM NAME, in DATA."
   (string-append data "/" name "/secrets"))
 
 (define (ssh-key-blob ssh-keygen key)
-  "Return the Base64 part of the public Ed25519 KEY, creating KEY unless it
-exists."
+  "Return the Base64 part of the public Ed25519 KEY.  Create KEY if
+missing."
   (unless (file-exists? key)
     (mkdir-p (dirname key))
     (invoke ssh-keygen "-q" "-t" "ed25519" "-N" "" "-C" "guix-microvm"
@@ -141,8 +137,8 @@ exists."
     (and (not (string-null? value)) value)))
 
 (define (git-identity git directory)
-  "Return the GIT_AUTHOR_* and GIT_COMMITTER_* variables, as an alist, taken
-from the environment or else DIRECTORY's Git configuration."
+  "Return GIT_AUTHOR_* and GIT_COMMITTER_* as an alist, from the environment
+or else DIRECTORY's Git configuration."
   (let ((name (or (getenv "GIT_AUTHOR_NAME")
                   (git-config git directory "user.name")))
         (email (or (getenv "GIT_AUTHOR_EMAIL")
@@ -155,8 +151,8 @@ from the environment or else DIRECTORY's Git configuration."
                . ,(or (getenv "GIT_COMMITTER_EMAIL") email))))))
 
 (define (read-secrets directory names)
-  "Return the contents of the files NAMES in DIRECTORY, for those that exist,
-as an alist of names and contents."
+  "Return the existing files NAMES in DIRECTORY as an alist of names and
+contents."
   (filter-map (lambda (name)
                 (let ((file (string-append directory "/" name)))
                   (and (file-exists? file)
@@ -166,8 +162,7 @@ as an alist of names and contents."
               names))
 
 (define (environment-with variables)
-  "Return the environment of this process, as 'environ' does, with VARIABLES,
-an alist of names and values, set."
+  "Return (environ) with VARIABLES, an alist of names and values, set."
   (define (entry-name entry)
     (string-take entry (or (string-index entry #\=) (string-length entry))))
 
@@ -179,9 +174,8 @@ an alist of names and values, set."
                   (environ))))
 
 (define (vm-variables git directory profile secrets-directory secrets)
-  "Return the variables for the VM, as an alist: the Git identity for
-DIRECTORY, the project's PROFILE, if any, and the SECRETS in
-SECRETS-DIRECTORY."
+  "Return the VM's variables as an alist: the Git identity for DIRECTORY,
+PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
   (append (git-identity git directory)
           (if profile
               `(("GUIX_MICROVM_PROFILE" . ,profile))
@@ -189,7 +183,7 @@ SECRETS-DIRECTORY."
           (read-secrets secrets-directory secrets)))
 
 (define (sent-variables secrets)
-  "Return the patterns of the variables ssh sends to the VM, with SECRETS."
+  "Return the SendEnv patterns for ssh, SECRETS included."
   `("LANG" "COLORTERM" "GIT_AUTHOR_*" "GIT_COMMITTER_*" "GUIX_MICROVM_PROFILE"
     ,@secrets))
 
@@ -204,7 +198,6 @@ SECRETS-DIRECTORY."
       (+ 128 (status:term-sig status))))
 
 (define (wait-for-exit pid)
-  "Wait for the process PID to exit and return its exit status."
   (exit-status (cdr (waitpid pid))))
 
 (define (child-alive? pid)
@@ -227,7 +220,7 @@ SECRETS-DIRECTORY."
 (define %vm-directory-prefix "guix-microvm.")
 
 (define (call-with-temporary-directory parent proc)
-  "Call PROC with a new directory in PARENT, deleted when PROC returns or
+  "Call PROC with a new directory in PARENT.  Delete it when PROC returns or
 exits."
   (let ((directory (mkdtemp (string-append parent "/" %vm-directory-prefix
                                            "XXXXXX"))))
@@ -238,8 +231,8 @@ exits."
 
 (define* (call-with-process program args proc
                             #:key (error (current-error-port)))
-  "Start PROGRAM with ARGS and its standard error to ERROR, call PROC with its
-PID, and stop it when PROC returns or exits."
+  "Start PROGRAM with ARGS, stderr to ERROR, and call PROC with its PID.
+Stop it when PROC returns or exits."
   (let ((pid (spawn program (cons program args)
                     #:input (force %null-port) #:error error)))
     (dynamic-wind
@@ -257,8 +250,8 @@ PID, and stop it when PROC returns or exits."
   (socket    server-socket))
 
 (define (call-with-servers servers thunk)
-  "Start SERVERS one after the other, call THUNK once all serve, and stop
-them when it returns or exits."
+  "Start SERVERS in order, call THUNK once all are up, and stop them when it
+returns or exits."
   (match servers
     (() (thunk))
     ((first rest ...)
@@ -272,12 +265,9 @@ them when it returns or exits."
   (string-append directory "/" name ".sock"))
 
 (define (qmp-socket-file directory)
-  "Return the QMP socket of the VM whose files are in DIRECTORY."
   (socket-file directory "qmp"))
 
 (define (vm-info-file directory)
-  "Return the file describing the VM whose files are in DIRECTORY, as an
-alist."
   (string-append directory "/vm"))
 
 (define (write-vm-info directory info)
@@ -285,7 +275,6 @@ alist."
     (cut write info <>)))
 
 (define (passt-server passt socket options)
-  "Return the server of the network at SOCKET, with the passt OPTIONS."
   (server passt
           `("--foreground" "--quiet" "--one-off" "--no-dhcp" "--no-map-gw"
             "--socket" ,socket ,@options)
@@ -300,22 +289,22 @@ alist."
   (wrapper   share-wrapper))            ;command prefix of virtiofsd
 
 (define (id-map-options guest-uid guest-gid host-uid host-gid)
-  "Return virtiofsd's options to map GUEST-UID and GUEST-GID to HOST-UID and
-HOST-GID of its user namespace."
+  "Return virtiofsd options mapping GUEST-UID and GUEST-GID to HOST-UID and
+HOST-GID in its user namespace."
   (list "--translate-uid" (format #f "map:~a:~a:1" guest-uid host-uid)
         "--translate-gid" (format #f "map:~a:~a:1" guest-gid host-gid)))
 
 (define (overflow-id kind)
-  "Return the ID unmapped users or groups have in a user namespace, KIND being
+  "Return the ID of unmapped users or groups in a user namespace, KIND being
 \"uid\" or \"gid\"."
   (call-with-input-file (string-append "/proc/sys/kernel/overflow" kind)
     read))
 
 (define* (vm-shares #:key directory home stateless? uid gid
                     store store-items mount-store)
-  "Return the shares of the VM: STORE-ITEMS at STORE, mounted there by
-MOUNT-STORE, and DIRECTORY and HOME, owned by UID and GID in the VM, the
-former read-only if STATELESS?."
+  "Return the VM's shares: STORE-ITEMS at STORE, mounted by MOUNT-STORE, and
+DIRECTORY and HOME, owned by UID and GID in the VM.  DIRECTORY is read-only
+if STATELESS?."
   (let ((owned (id-map-options uid gid 0 0)))
     (list
      ;; Store items are root's, hence nobody's in the namespace.
@@ -335,7 +324,7 @@ former read-only if STATELESS?."
 ;; virtiofsd runs as root of a user namespace in which the host user is root
 ;; and other users are nobody.
 (define* (virtiofs-server share socket #:key unshare virtiofsd cache)
-  "Return the server of SHARE at SOCKET."
+  "Return a virtiofsd server for SHARE at SOCKET."
   (server unshare
           `("--user" "--map-root-user" "--mount"
             ,@(share-wrapper share)
@@ -346,7 +335,7 @@ former read-only if STATELESS?."
           socket))
 
 (define (virtiofs-device share socket)
-  "Return QEMU's options for the virtio-fs device of SHARE served at SOCKET."
+  "Return QEMU options for the virtio-fs device of SHARE at SOCKET."
   (let ((tag (share-tag share)))
     (list "-chardev" (string-append "socket,id=" tag ",path=" socket)
           "-device" (string-append "vhost-user-fs-device,chardev=" tag
@@ -354,9 +343,9 @@ former read-only if STATELESS?."
 
 ;; Forwarded over SSH, not vsock, which other guests can reach.
 (define (wayland-forwarding waypipe name socket guest-socket)
-  "Return the servers, the command wrapper and the ssh options that show the
-Wayland clients of the VM NAME on the host's display, through SOCKET on the
-host and GUEST-SOCKET in the VM, or nothing without WAYPIPE."
+  "Return the servers, command wrapper and ssh options that show Wayland
+clients of VM NAME on the host's display, via SOCKET on the host and
+GUEST-SOCKET in the VM.  Without WAYPIPE, return empty lists."
   (if waypipe
       (values (list (server waypipe
                             `("--socket" ,socket "--no-gpu"
@@ -370,8 +359,8 @@ host and GUEST-SOCKET in the VM, or nothing without WAYPIPE."
 
 (define* (ssh-arguments destination command
                         #:key key socat cid port send-env options)
-  "Return the arguments of ssh to run COMMAND at DESTINATION, reached over
-vsock at CID and PORT with KEY."
+  "Return ssh arguments to run COMMAND at DESTINATION over vsock CID:PORT
+with KEY."
   `("ssh" "-F" "/dev/null" "-q"
     "-i" ,key "-o" "IdentitiesOnly=yes"
     "-o" "StrictHostKeyChecking=no"
@@ -385,10 +374,10 @@ vsock at CID and PORT with KEY."
 
 (define* (ssh-spawner ssh destination
                       #:key key socat cid port send-env environment)
-  "Return a procedure that spawns SSH to run a command at DESTINATION, reached
-over vsock at CID and PORT with KEY, sending the variables SEND-ENV of
-ENVIRONMENT, and returns its PID.  It takes ssh's additional OPTIONS and the
-OUTPUT and ERROR ports."
+  "Return a procedure that runs a command at DESTINATION with SSH and returns
+its PID.  SSH connects over vsock CID:PORT with KEY and sends the SEND-ENV
+variables of ENVIRONMENT.  The procedure takes extra ssh OPTIONS and OUTPUT
+and ERROR ports."
   (lambda* (command #:key (options '())
                     (output (current-output-port))
                     (error (current-error-port)))
@@ -419,8 +408,8 @@ OUTPUT and ERROR ports."
          output)))))
 
 (define (remote-command command wrapper status-file)
-  "Return the shell command that runs COMMAND, or a login shell if it is
-empty, in /work, under WRAPPER, and writes its exit status to STATUS-FILE."
+  "Return a shell command that runs COMMAND, or a login shell if it is empty,
+in /work under WRAPPER and writes the exit status to STATUS-FILE."
   (let ((script (string-append "cd /work && "
                                (string-join (if (null? command)
                                                 '("\"$SHELL\"" "-l")
@@ -432,8 +421,8 @@ empty, in /work, under WRAPPER, and writes its exit status to STATUS-FILE."
         (string-join (append wrapper (list "sh" "-c" (shell-quote script)))))))
 
 (define (serial-options log serial)
-  "Return QEMU's options for the serial console, appended to LOG unless
-SERIAL names another chardev."
+  "Return QEMU options for the serial console: SERIAL if set, else append to
+LOG."
   (match serial
     (#f `("-chardev" ,(string-append "file,id=serial,path=" log ",append=on")
           "-serial" "chardev:serial"))
@@ -441,9 +430,9 @@ SERIAL names another chardev."
 
 (define* (qemu-arguments #:key kernel initrd kernel-arguments memory cpus cid
                          network serial devices usb? qmp)
-  "Return QEMU's arguments to boot KERNEL on a microvm with MEMORY MiB and
-CPUS, the vsock address CID, the NIC served at NETWORK, DEVICES and the QMP
-socket QMP.  USB? adds a USB controller, which needs ACPI."
+  "Return QEMU arguments to boot KERNEL on a microvm with MEMORY MiB, CPUS,
+vsock CID, a NIC at NETWORK, DEVICES and the QMP socket QMP.  USB? adds a
+USB controller, which needs ACPI."
   `("-M" ,(string-append "microvm,"
                          (if usb? "acpi=on,usb=on" "acpi=off")
                          ",rtc=on,memory-backend=mem")
@@ -466,15 +455,15 @@ socket QMP.  USB? adds a USB controller, which needs ACPI."
     ,@devices))
 
 (define (open-log file)
-  "Return a port appending to FILE, emptied first.  QEMU appends its serial
+  "Empty FILE and return a port appending to it.  QEMU appends the serial
 console to it too."
   (let ((port (open-file file "a")))
     (truncate-file port 0)
     port))
 
 (define (vm-kernel-arguments key-blob stateless? kernel-arguments)
-  "Return the kernel command line of the VM, as a list, with KERNEL-ARGUMENTS
-and the SSH key KEY-BLOB."
+  "Return the VM's kernel command line as a list: KERNEL-ARGUMENTS and the
+SSH key KEY-BLOB."
   ;; With -no-reboot, QEMU exits on a panic.
   `("console=ttyS0" "panic=-1"
     ,(string-append "guix-microvm.ssh-key=" key-blob)
@@ -482,15 +471,15 @@ and the SSH key KEY-BLOB."
     ,@kernel-arguments))
 
 (define (call-with-vm qemu arguments log proc)
-  "Start QEMU with ARGUMENTS and its standard error appended to LOG, call
-PROC with its PID, and stop it when PROC returns or exits."
+  "Start QEMU with ARGUMENTS, stderr appended to LOG, and call PROC with its
+PID.  Stop it when PROC returns or exits."
   (call-with-port (open-log log)
     (lambda (port)
       (call-with-process qemu arguments proc #:error port))))
 
 (define* (boot-failure-handler log #:key show-log?)
-  "Return a procedure that fails with a message about the boot of the VM,
-whose console is in LOG, showing LOG if SHOW-LOG? or else naming it."
+  "Return a procedure that fails with a boot error message.  It prints LOG,
+the console output, if SHOW-LOG?, or else names it."
   (lambda (message)
     (if show-log?
         (begin
@@ -500,8 +489,8 @@ whose console is in LOG, showing LOG if SHOW-LOG? or else naming it."
         (fail (string-append message ", see ~a") log))))
 
 (define (wait-for-boot spawn-ssh vm timeout on-failure)
-  "Wait until the VM, whose QEMU process is VM, accepts SSH connections, or
-call ON-FAILURE with a message if it exits or TIMEOUT seconds pass first."
+  "Wait until the QEMU process VM accepts SSH.  Call ON-FAILURE with a
+message if it exits or TIMEOUT seconds pass first."
   (let ((deadline (+ (current-time) timeout)))
     (let loop ()
       (unless (ssh-succeeds? spawn-ssh "true")
@@ -514,8 +503,8 @@ call ON-FAILURE with a message if it exits or TIMEOUT seconds pass first."
                (loop)))))))
 
 (define (run-remote spawn-ssh command options status-file)
-  "Run the shell COMMAND, which writes its exit status to STATUS-FILE, with
-the ssh OPTIONS, and return that status."
+  "Run the shell COMMAND with ssh OPTIONS and return the exit status it
+writes to STATUS-FILE."
   (let ((status (wait-for-exit (spawn-ssh command #:options options))))
     ;; Sync before QEMU is stopped.  The exit status comes from a file, as
     ;; ssh's own cannot be told apart from the command's.
@@ -536,8 +525,7 @@ the ssh OPTIONS, and return that status."
             '("/dev/kvm" "/dev/vhost-vsock")))
 
 (define (exit-on-signals!)
-  "Exit, which stops the VM, on the signals that would otherwise kill this
-process."
+  "Exit, stopping the VM, on SIGINT, SIGTERM and SIGHUP."
   (for-each (lambda (signal)
               (sigaction signal
                 (lambda (signal)
@@ -557,7 +545,6 @@ process."
 (define %status-file "/tmp/guix-microvm-status")
 
 (define* (share-servers shares tmp #:key unshare virtiofsd cache)
-  "Return the servers of SHARES, with their sockets in TMP."
   (map (lambda (share)
          (virtiofs-server share (share-socket tmp share)
                           #:unshare unshare #:virtiofsd virtiofsd
@@ -565,15 +552,14 @@ process."
        shares))
 
 (define (share-devices shares tmp)
-  "Return QEMU's options for the devices of SHARES, served in TMP."
   (append-map (lambda (share)
                 (virtiofs-device share (share-socket tmp share)))
               shares))
 
 (define* (boot-and-run spawn-ssh vm command
                        #:key boot-timeout on-boot-failure ssh-options)
-  "Wait for the VM, whose QEMU process is VM, to boot, run the shell COMMAND
-in it with SSH-OPTIONS, and return its exit status."
+  "Wait for the QEMU process VM to boot, run the shell COMMAND with
+SSH-OPTIONS and return its exit status."
   (wait-for-boot spawn-ssh vm boot-timeout on-boot-failure)
   (run-remote spawn-ssh command ssh-options %status-file))
 
@@ -584,11 +570,10 @@ in it with SSH-OPTIONS, and return its exit status."
                       network-options
                       qemu virtiofsd passt waypipe ssh ssh-keygen socat git
                       unshare mount-store secrets usb?)
-  "Run the microvm NAME with the command line ARGS, and return the exit status
-of the command run in it, by default DEFAULT-COMMAND.  With WAYPIPE, Wayland
-clients in the VM show on the host's Wayland display.  STATELESS?, or
---stateless, gives the VM a fresh home and discards its changes to DIR.  USB?
-gives it a USB controller, for 'guix microvm usb' to attach host devices to."
+  "Run microvm NAME with the command line ARGS and return the exit status of
+its command, DEFAULT-COMMAND unless ARGS name one.  WAYPIPE shows Wayland
+clients on the host's display.  STATELESS? or --stateless gives a fresh home
+and discards changes to DIR.  USB? adds a controller for 'guix microvm usb'."
   (parameterize ((%program-name (string-append "run-" name)))
     (call-with-launcher-errors
      (lambda ()

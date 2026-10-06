@@ -56,8 +56,7 @@
   (string-append "/run/user/" (number->string (microvm-guest-uid config))))
 
 (define (kernel-option name)
-  "Return a gexp for the value of NAME=VALUE on the kernel command line, or
-#f."
+  "Return a gexp for VALUE of NAME=VALUE on the kernel command line, or #f."
   #~(let ((prefix #$(string-append name "=")))
       (any (lambda (arg)
              (and (string-prefix? prefix arg)
@@ -83,7 +82,7 @@
 
 ;; The key comes from the kernel command line, not the system.
 (define (ssh-authorized-key-service user)
-  "Return the service authorizing the launcher's key to log in as USER."
+  "Return the service that authorizes the launcher's key for USER."
   (shepherd-service
     (provision '(ssh-authorized-key))
     (one-shot? #t)
@@ -206,9 +205,9 @@ fi
                                    . ,(microvm-guest-runtime-directory
                                        config)))))))
     (default-value (microvm-guest-configuration))
-    (description "Make the system a guest of the guix-microvm launcher: run
-commands over SSH on vsock as the configured user, and overlay /work with a
-tmpfs when the launcher asks for a stateless VM.")))
+    (description "Make the system a guix-microvm guest: accept commands over
+SSH on vsock as the configured user, and overlay /work with a tmpfs in
+stateless VMs.")))
 
 (define %microvm-base-services
   (cons* (service microvm-guest-service-type)

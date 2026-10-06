@@ -37,7 +37,7 @@
   (false-if-exception (begin (kill pid 0) #t)))
 
 (define (directory->running-vm directory)
-  "Return the running VM whose files are in DIRECTORY, or #f if it exited."
+  "Return the VM running from DIRECTORY, or #f if it exited."
   (match (false-if-exception
           (call-with-input-file (vm-info-file directory) read))
     ((? list? info)
@@ -59,7 +59,7 @@
 ;;; QMP
 
 (define (qmp-receive port)
-  "Return the next message on PORT that is not an event."
+  "Return the next message on PORT, skipping events."
   (match (read-line port)
     ((? eof-object?)
      (raise-exception
@@ -71,7 +71,7 @@
            message)))))
 
 (define* (qmp-execute port command #:optional arguments)
-  "Execute COMMAND with ARGUMENTS, an alist, over PORT and return its result."
+  "Run COMMAND with the alist ARGUMENTS over PORT and return the result."
   (write-line (scm->json-string
                `(("execute" . ,command)
                  ,@(if arguments `(("arguments" . ,arguments)) '())))
@@ -85,8 +85,8 @@
                                  (assoc-ref error "desc")))))))
 
 (define (call-with-qmp file proc)
-  "Connect to the QMP socket FILE and call PROC with a procedure that takes a
-command and its arguments, executes it and returns its result."
+  "Connect to the QMP socket FILE and call PROC with a procedure that runs a
+command, with optional arguments, and returns the result."
   (let ((port (socket PF_UNIX SOCK_STREAM 0)))
     (dynamic-wind
       (const #t)
@@ -100,8 +100,8 @@ command and its arguments, executes it and returns its result."
 ;;; USB
 
 (define (string->usb-id str)
-  "Return the vendor and product IDs STR specifies, VENDOR or VENDOR:PRODUCT
-in hexadecimal, as a pair whose product is #f for any, or #f."
+  "Parse STR, VENDOR or VENDOR:PRODUCT in hexadecimal, into a pair.  The
+product is #f if left out.  Return #f if STR is invalid."
   (match (map (cut string->number <> 16) (string-split str #\:))
     (((? integer? vendor)) (cons vendor #f))
     (((? integer? vendor) (? integer? product)) (cons vendor product))
@@ -113,8 +113,8 @@ in hexadecimal, as a pair whose product is #f for any, or #f."
     ((vendor . product) (format #f "~4,'0x:~4,'0x" vendor product))))
 
 (define (usb-id-matches? pattern id)
-  "Return true if ID, a pair of vendor and product IDs, matches PATTERN,
-whose product may be #f for any."
+  "Return true if ID, a vendor and product pair, matches PATTERN.  A PATTERN
+product of #f matches any product."
   (match (list pattern id)
     (((vendor . product) (vendor* . product*))
      (and (= vendor vendor*)
@@ -126,8 +126,8 @@ whose product may be #f for any."
          (string-trim-right (call-with-input-file file get-string-all)))))
 
 (define (sysfs-usb-device directory)
-  "Return the IDs and the device file of the USB device whose sysfs
-DIRECTORY this is, as a pair, or #f if it is an interface."
+  "Return the IDs and device file of the USB device at the sysfs DIRECTORY,
+as a pair, or #f for an interface."
   (let ((attribute (cut sysfs-attribute directory <>)))
     (and (attribute "idVendor")
          (cons (cons (string->number (attribute "idVendor") 16)
@@ -146,12 +146,11 @@ DIRECTORY this is, as a pair, or #f if it is an interface."
               (or (scandir sysfs (negate (cut string-prefix? "." <>))) '())))
 
 (define (usb-device-name id)
-  "Return the QEMU device name of the host USB device with ID."
   (string-append "usb-" (string-map (match-lambda (#\: #\-) (c c))
                                     (usb-id->string id))))
 
 (define (usb-host-arguments id)
-  "Return the arguments of 'device_add' for the host USB device with ID."
+  "Return the 'device_add' arguments for the host USB device ID."
   (match id
     ((vendor . product)
      `(("driver" . "usb-host")
@@ -160,7 +159,7 @@ DIRECTORY this is, as a pair, or #f if it is an interface."
        ,@(if product `(("productid" . ,product)) '())))))
 
 (define (check-usb-device id)
-  "Raise an error unless a USB device with ID is plugged in and accessible."
+  "Raise an error unless the USB device ID is plugged in and accessible."
   (match (present-usb-devices id)
     (()
      (raise-exception
@@ -176,8 +175,7 @@ rule can give you access to it")
                files))))
 
 (define (attach-usb! vm id)
-  "Give VM the host's USB device with ID, which the host lacks until it is
-detached or VM exits."
+  "Move the host's USB device ID to VM until it is detached or VM exits."
   (unless (running-vm-usb? vm)
     (raise-exception
      (formatted-message (G_ "~a has no USB controller: its microvm lacks \
@@ -188,6 +186,5 @@ detached or VM exits."
     (cut <> "device_add" (usb-host-arguments id))))
 
 (define (detach-usb! vm id)
-  "Give the USB device with ID that VM has back to the host."
   (call-with-qmp (running-vm-qmp-socket vm)
     (cut <> "device_del" `(("id" . ,(usb-device-name id))))))

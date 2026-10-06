@@ -47,8 +47,8 @@
   project-files)
 
 (define (exit-code thunk)
-  "Return the status THUNK exits with, or that of the launcher error it
-raises, or #f if it returns."
+  "Return the status THUNK exits with or raises as a launcher error, or #f
+if it returns."
   (catch 'quit
     (lambda ()
       (guard (error ((launcher-error? error)
@@ -58,14 +58,13 @@ raises, or #f if it returns."
     (lambda (key status) status)))
 
 (define (quietly thunk)
-  "Call THUNK with errors and warnings sent to /dev/null."
   (call-with-port (open-file "/dev/null" "w")
     (lambda (null)
       (parameterize ((guix-warning-port null))
         (with-error-to-port null thunk)))))
 
 (define (with-environment variables thunk)
-  "Call THUNK with VARIABLES, an alist of names and values or #f, set."
+  "Call THUNK with VARIABLES set, an alist of names and values; #f unsets."
   (let ((old (map (match-lambda ((name . _) (cons name (getenv name))))
                   variables)))
     (define (set-all! alist)
@@ -79,27 +78,24 @@ raises, or #f if it returns."
       (lambda () (set-all! old)))))
 
 (define (sh-output script)
-  "Return the output of the shell SCRIPT."
   (let* ((port (open-pipe* OPEN_READ "sh" "-c" script))
          (output (get-string-all port)))
     (close-pipe port)
     output))
 
 (define (server-script file)
-  "Return the arguments of sh to write its PID to FILE.pid, create FILE and
+  "Return arguments for sh that write its PID to FILE.pid, create FILE and
 sleep."
   `("-c" ,(string-append "echo $$ > " file ".pid; touch " file
                          "; exec sleep 100")))
 
 (define (stopped? pid-file)
-  "Return true if the process whose PID is in PID-FILE no longer exists."
   (let ((pid (string->number
               (string-trim-right (call-with-input-file pid-file
                                    get-string-all)))))
     (not (false-if-exception (begin (kill pid 0) #t)))))
 
 (define (failure-reporter)
-  "Return a test runner that reports failures only."
   (let ((runner (test-runner-null)))
     (test-runner-on-test-end! runner
       (lambda (runner)
@@ -432,9 +428,9 @@ sleep."
   (call-with-output-file file (cut display content <>)))
 
 (define (fake-qmp-server file)
-  "Serve QMP at FILE to one client and return the thread doing it, which
-returns the commands it received.  It sends an event before each reply, and
-an error for the command \"fail\"."
+  "Serve QMP at FILE to one client.  Return the serving thread; joining it
+gives the commands received.  Each reply follows an event; the command
+\"fail\" gets an error."
   (let ((server (socket PF_UNIX SOCK_STREAM 0)))
     (define (send client message)
       (write-line (scm->json-string message) client)
