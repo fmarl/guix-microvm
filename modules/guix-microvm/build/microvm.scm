@@ -216,7 +216,6 @@ PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
 (define (runtime-directory)
   (getenv* "XDG_RUNTIME_DIR" "/tmp"))
 
-;; That of the directories of the running VMs in the runtime directory.
 (define %vm-directory-prefix "guix-microvm.")
 
 (define (call-with-temporary-directory parent proc)
@@ -285,7 +284,7 @@ returns or exits."
   share?
   (tag       share-tag)
   (directory share-directory)
-  (options   share-options)             ;virtiofsd options
+  (options   share-options)
   (wrapper   share-wrapper))            ;command prefix of virtiofsd
 
 (define (id-map-options guest-uid guest-gid host-uid host-gid)
