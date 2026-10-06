@@ -203,7 +203,7 @@ SECRETS-DIRECTORY."
   "Wait for the process PID to exit and return its exit status."
   (exit-status (cdr (waitpid pid))))
 
-(define (alive? pid)
+(define (child-alive? pid)
   (match (waitpid pid WNOHANG)
     ((0 . _) #t)
     (_ #f)))
@@ -211,7 +211,7 @@ SECRETS-DIRECTORY."
 (define (wait-for-socket file pid)
   (let loop ()
     (unless (file-exists? file)
-      (unless (alive? pid)
+      (unless (child-alive? pid)
         (fail "no ~a, the program serving it exited" file))
       (usleep 100000)
       (loop))))
@@ -501,7 +501,7 @@ call ON-FAILURE with a message if it exits or TIMEOUT seconds pass first."
   (let ((deadline (+ (current-time) timeout)))
     (let loop ()
       (unless (ssh-succeeds? spawn-ssh "true")
-        (cond ((not (alive? vm))
+        (cond ((not (child-alive? vm))
                (on-failure "the VM exited"))
               ((> (current-time) deadline)
                (on-failure "no SSH connection to the VM"))
