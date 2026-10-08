@@ -201,6 +201,18 @@ then
 fi
 "))
 
+;; /etc/bashrc sources it after setting its own PS1.
+(define microvm-prompt
+  (plain-file "guix-microvm-prompt.sh" "\
+PS1='\\h:\\w $(s=$?; [ $s = 0 ] || printf \"\\001\\033[31m\\002%s \\001\\033[0m\\002\" $s)'
+if [ \"$EUID\" = 0 ]
+then
+  PS1=\"$PS1\"'\\[\\033[31m\\]#\\[\\033[0m\\] '
+else
+  PS1=\"$PS1\"'μ '
+fi
+"))
+
 (define microvm-guest-service-type
   (service-type
     (name 'microvm-guest)
@@ -213,7 +225,9 @@ fi
                               guest-networks)
            (service-extension etc-service-type
                               (const `(("profile.d/guix-microvm-profile.sh"
-                                        ,project-profile))))
+                                        ,project-profile)
+                                       ("bashrc.d/guix-microvm-prompt.sh"
+                                        ,microvm-prompt))))
            (service-extension udev-service-type guest-udev-rules)
            (service-extension session-environment-service-type
                               (lambda (config)
