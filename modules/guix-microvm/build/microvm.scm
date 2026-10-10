@@ -273,8 +273,8 @@ PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
 
 (define (passt-server passt socket options)
   (server passt
-          `("--foreground" "--quiet" "--one-off" "--no-dhcp" "--no-map-gw"
-            "--socket" ,socket ,@options)
+          `("--foreground" "--quiet" "--one-off" "--ipv4-only" "--no-dhcp"
+            "--no-map-gw" "--socket" ,socket ,@options)
           socket))
 
 (define (network-servers directory config tools)
