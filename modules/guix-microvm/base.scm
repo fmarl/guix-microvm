@@ -294,4 +294,16 @@ stateless VMs.")))
                         (virtiofs-file-system "home" "/home")
                         %pseudo-terminal-file-system
                         %shared-memory-file-system))
+    (skeletons (cons `(".bash_profile"
+                       ,(plain-file "bash_profile" "\
+if [ -f ~/.bashrc ]
+then
+  . ~/.bashrc
+fi
+"))
+                     (remove (lambda (skeleton)
+                               (member (car skeleton)
+                                       '(".bash_profile"
+                                         "guix-home-config.scm")))
+                             (default-skeletons))))
     (services %microvm-base-services)))
