@@ -41,10 +41,14 @@
 
 (define (show-help)
   (display (G_ "Usage: guix microvm [OPTION]... [-- COMMAND...]
+   or: guix microvm list
+   or: guix microvm stop NAME
    or: guix microvm usb attach|detach NAME VENDOR[:PRODUCT]
 Run COMMAND, or a login shell, in a microvm sharing the project directory at
 /work.  The microvm is the one vm.scm defines, or the base VM, with the
 packages of manifest.scm.
+
+Or list the running microvms, or stop the running microvm NAME.
 
 Or give the running microvm NAME the host's USB device with the hexadecimal
 IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
@@ -390,11 +394,19 @@ the current project."
      (leave (G_ "usage: guix microvm usb attach|detach NAME \
 VENDOR[:PRODUCT]~%")))))
 
+(define (list-vms)
+  (for-each (lambda (vm)
+              (format #t "~a\t~a~%"
+                      (running-vm-name vm) (running-vm-directory vm)))
+            (running-vms)))
+
 (define-command (guix-microvm . args)
   (category development)
   (synopsis "run commands in a microvm with a project's packages")
 
   (with-error-handling
     (match args
+      (("list") (list-vms))
+      (("stop" name) (stop-vm! (find-running-vm name)))
       (("usb" rest ...) (control-usb rest))
       (_ (run-in-microvm args)))))

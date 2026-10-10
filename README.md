@@ -32,6 +32,8 @@ guix microvm --stateless -- make check  # discard home and changes to /work
 guix microvm --vm=claude-vm -- claude
 guix microvm --vm=librewolf-vm
 guix microvm --allow                    # allow new or changed project files
+guix microvm list                       # running VMs
+guix microvm stop vm
 ```
 
 `vm.scm` and `manifest.scm` are searched in the current directory and its

@@ -49,7 +49,7 @@
   guest-configuration)
 
 (define-private (guix-microvm control)
-  process-exists? usb-id-matches? usb-host-arguments running-vm)
+  usb-id-matches? usb-host-arguments running-vm)
 
 (define-private (guix extensions microvm)
   string->forwarded-port launcher-flags project-directory read-project
@@ -115,6 +115,9 @@ if it returns."
 sleep."
   `("-c" ,(string-append "echo $$ > " file ".pid; touch " file
                          "; exec sleep 100")))
+
+(define (process-exists? pid)
+  (false-if-exception (begin (kill pid 0) #t)))
 
 (define (stopped? pid-file)
   (not (process-exists? (call-with-input-file pid-file read))))
@@ -661,23 +664,37 @@ gives the commands received.  Each reply follows an event; the command
 
 (test-equal "running-vms"
   '(("a" "/p" #t))
-  (let ((runtime (string-append tmp "/runtime"))
-        (exited (spawn "true" '("true"))))
-    (waitpid exited)
-    (for-each (match-lambda
-                ((directory name pid)
-                 (write-file (string-append runtime "/" directory "/vm")
-                             (object->string
-                              `((name . ,name) (directory . "/p")
-                                (usb? . #t) (pid . ,pid))))))
-              `(("guix-microvm.a" "a" ,(getpid))
-                ("guix-microvm.b" "b" ,exited)
-                ("other" "c" ,(getpid))))
+  (let* ((runtime (string-append tmp "/runtime"))
+         (locks
+          (filter-map (match-lambda
+                        ((directory name locked?)
+                         (let ((file (string-append runtime "/" directory
+                                                    "/vm")))
+                           (write-file file
+                                       (object->string
+                                        `((name . ,name) (directory . "/p")
+                                          (usb? . #t))))
+                           (and locked?
+                                (let ((port (open-input-file file)))
+                                  (flock port LOCK_EX)
+                                  port)))))
+                      '(("guix-microvm.a" "a" #t)
+                        ("guix-microvm.b" "b" #f)
+                        ("other" "c" #t)))))
     (mkdir-p (string-append runtime "/guix-microvm.empty"))
-    (map (lambda (vm)
-           (list (running-vm-name vm) (running-vm-directory vm)
-                 (running-vm-usb? vm)))
-         (running-vms runtime))))
+    (let ((vms (running-vms runtime)))
+      (for-each close-port locks)
+      (map (lambda (vm)
+             (list (running-vm-name vm) (running-vm-directory vm)
+                   (running-vm-usb? vm)))
+           vms))))
+
+(test-equal "stop-vm!"
+  '("qmp_capabilities" "quit")
+  (let* ((file (string-append tmp "/stop.sock"))
+         (server (fake-qmp-server file)))
+    (stop-vm! (running-vm "vm" "/p" #f file))
+    (join-thread server)))
 
 (test-equal "call-with-qmp"
   '((("answer" . "query-status")) "QEMU: failed"

@@ -182,9 +182,14 @@ exits."
 (define (vm-info-file directory)
   (string-append directory "/vm"))
 
-(define (write-vm-info directory info)
+(define (call-with-vm-info directory info thunk)
+  "Write INFO to the info file in DIRECTORY, locked while THUNK runs."
   (call-with-output-file (vm-info-file directory)
-    (cut write info <>)))
+    (lambda (port)
+      (flock port LOCK_EX)
+      (write info port)
+      (force-output port)
+      (thunk))))
 
 (define (guest-runtime-directory uid)
   ;; Same as 'microvm-guest-runtime-directory' in (guix-microvm base).
@@ -462,35 +467,39 @@ status."
                                (socket-file tmp "waypipe")
                                (string-append (guest-runtime-directory uid)
                                               "/waypipe.sock")))
+             (servers (append (network-servers tmp config tools)
+                              wayland-servers
+                              (share-servers
+                               shares tmp
+                               #:unshare (tools-unshare tools)
+                               #:virtiofsd (tools-virtiofsd tools)
+                               #:cache cache)))
              (cid (vm-cid))
              (key-blob (ssh-key-blob (tools-ssh-keygen tools) key))
              (spawn-ssh (vm-ssh-spawner config tools data directory key cid))
              (status-file (guest-status-file uid)))
+        (define (boot qemu)
+          (boot-and-run spawn-ssh qemu
+                        (remote-command command wrapper status-file)
+                        #:boot-timeout (invocation-boot-timeout invocation)
+                        ;; A stateless VM's log is deleted on exit, so show it.
+                        #:on-boot-failure (boot-failure-handler
+                                           log #:show-log? stateless?)
+                        #:ssh-options (cons "-t" forward-options)
+                        #:status-file status-file))
+
+        (define (start-vm)
+          (call-with-vm (tools-qemu tools)
+              (vm-qemu-arguments tmp invocation config shares
+                                 #:key-blob key-blob #:cid cid #:log log)
+              log
+            boot))
+
         (for-each mkdir-p (map share-directory shares))
-        (write-vm-info tmp `((name . ,name)
-                             (directory . ,directory)
-                             (usb? . ,usb?)
-                             (pid . ,(getpid))))
-        (call-with-servers
-            (append (network-servers tmp config tools)
-                    wayland-servers
-                    (share-servers shares tmp
-                                   #:unshare (tools-unshare tools)
-                                   #:virtiofsd (tools-virtiofsd tools)
-                                   #:cache cache))
-          (lambda ()
-            (call-with-vm (tools-qemu tools)
-                (vm-qemu-arguments tmp invocation config shares
-                                   #:key-blob key-blob #:cid cid #:log log)
-                log
-              (cut boot-and-run spawn-ssh <>
-                   (remote-command command wrapper status-file)
-                   #:boot-timeout (invocation-boot-timeout invocation)
-                   ;; A stateless VM's log is deleted on exit, so show it.
-                   #:on-boot-failure (boot-failure-handler
-                                      log #:show-log? stateless?)
-                   #:ssh-options (cons "-t" forward-options)
-                   #:status-file status-file))))))))
+        (call-with-vm-info tmp `((name . ,name)
+                                 (directory . ,directory)
+                                 (usb? . ,usb?))
+          (cut call-with-servers servers start-vm))))))
 
 (define (run-microvm args config tools)
   "Run the VM CONFIG with TOOLS as the command line ARGS ask: share DIR at

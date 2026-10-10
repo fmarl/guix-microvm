@@ -20,6 +20,7 @@
             running-vm-usb?
             running-vm-qmp-socket
             running-vms
+            stop-vm!
             call-with-qmp
             string->usb-id
             present-usb-devices
@@ -34,20 +35,34 @@
   (usb?       running-vm-usb?)
   (qmp-socket running-vm-qmp-socket))
 
-(define (process-exists? pid)
-  (false-if-exception (begin (kill pid 0) #t)))
+;; Without XDG_RUNTIME_DIR, other users can create entries in /tmp.
+(define (owned? file)
+  (= (stat:uid (lstat file)) (getuid)))
+
+(define (locked? file)
+  (call-with-input-file file
+    (lambda (port)
+      (catch 'system-error
+        (lambda ()
+          (flock port (logior LOCK_SH LOCK_NB))
+          #f)
+        (lambda args
+          (= EWOULDBLOCK (system-error-errno args)))))))
 
 (define (directory->running-vm directory)
   "Return the VM running from DIRECTORY, or #f if it exited."
-  (match (false-if-exception
-          (call-with-input-file (vm-info-file directory) read))
-    ((? list? info)
-     (and (process-exists? (assq-ref info 'pid))
-          (running-vm (assq-ref info 'name)
-                      (assq-ref info 'directory)
-                      (assq-ref info 'usb?)
-                      (qmp-socket-file directory))))
-    (_ #f)))
+  (let ((file (vm-info-file directory)))
+    (match (false-if-exception
+            (and (owned? directory)
+                 (owned? file)
+                 (locked? file)
+                 (call-with-input-file file read)))
+      ((? list? info)
+       (running-vm (assq-ref info 'name)
+                   (assq-ref info 'directory)
+                   (assq-ref info 'usb?)
+                   (qmp-socket-file directory)))
+      (_ #f))))
 
 (define* (running-vms #:optional (runtime (runtime-directory)))
   (filter-map (lambda (name)
@@ -190,3 +205,9 @@ rule can give you access to it")
 (define (detach-usb! vm id)
   (call-with-qmp (running-vm-qmp-socket vm)
     (cut <> "device_del" `(("id" . ,(usb-device-name id))))))
+
+(define (stop-vm! vm)
+  (call-with-qmp (running-vm-qmp-socket vm)
+    (lambda (execute)
+      ;; QEMU may exit before it replies.
+      (false-if-exception (execute "quit")))))
