@@ -14,7 +14,6 @@
   #:use-module (gnu packages base)
   #:use-module (gnu packages bash)
   #:use-module (gnu packages networking)
-  #:use-module (gnu packages ssh)
   #:use-module (guix-microvm kernel)
   #:export (microvm-guest-configuration
             microvm-guest-configuration?
@@ -139,6 +138,9 @@
           (ssh-vsock-service ssh-port)
           (ssh-authorized-key-service user))))
 
+;; Same as in (guix-microvm build shares).
+(define %host-key-name ".guix-microvm-ssh-host-key")
+
 (define (guest-activation config)
   (match-record config <microvm-guest-configuration> (uid gid)
     (with-imported-modules '((guix build utils))
@@ -155,9 +157,9 @@
             (chown runtime #$uid #$gid)
             (chmod runtime #o700))
           (mkdir-p "/etc/ssh")
-          (invoke #$(file-append openssh "/bin/ssh-keygen") "-q"
-                  "-t" "ed25519" "-N" ""
-                  "-f" "/etc/ssh/ssh_host_ed25519_key")))))
+          (copy-file (string-append (%store-directory) "/" #$%host-key-name)
+                     "/etc/ssh/ssh_host_ed25519_key")
+          (chmod "/etc/ssh/ssh_host_ed25519_key" #o600)))))
 
 (define (guest-udev-rules config)
   (list (udev-rule "90-guix-microvm.rules"

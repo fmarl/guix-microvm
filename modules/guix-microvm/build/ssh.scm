@@ -9,6 +9,7 @@
   #:use-module (guix-microvm build process)
   #:export (shell-quote
             ssh-key-blob
+            write-known-hosts
             ssh-spawner
             ssh-succeeds?
             ssh-output
@@ -30,14 +31,23 @@ missing."
     (("ssh-ed25519" blob _ ...) blob)
     (_ (fail "~a.pub is not an Ed25519 key" key))))
 
+(define %host-key-alias "guix-microvm")
+
+(define (write-known-hosts file host-key-blob)
+  (call-with-output-file file
+    (lambda (port)
+      (format port "~a ssh-ed25519 ~a~%" %host-key-alias host-key-blob))))
+
 (define* (ssh-arguments destination command
-                        #:key key socat cid port send-env options)
+                        #:key key known-hosts socat cid port send-env options)
   "Return ssh arguments to run COMMAND at DESTINATION over vsock CID:PORT
-with KEY."
+with KEY and KNOWN-HOSTS."
   `("ssh" "-F" "/dev/null" "-q"
     "-i" ,key "-o" "IdentitiesOnly=yes"
-    "-o" "StrictHostKeyChecking=no"
-    "-o" "UserKnownHostsFile=/dev/null"
+    "-o" "StrictHostKeyChecking=yes"
+    "-o" ,(string-append "UserKnownHostsFile=" known-hosts)
+    "-o" "GlobalKnownHostsFile=/dev/null"
+    "-o" ,(string-append "HostKeyAlias=" %host-key-alias)
     "-o" "ForwardAgent=no" "-o" "ForwardX11=no"
     "-o" ,(string-append "SendEnv=" (string-join send-env))
     "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a" socat cid port)
@@ -46,14 +56,16 @@ with KEY."
     ,command))
 
 (define* (ssh-spawner ssh destination
-                      #:key key socat cid port send-env environment)
+                      #:key key known-hosts socat cid port send-env
+                      environment)
   "Return a procedure that runs a command at DESTINATION with SSH over vsock
 and returns its PID."
   (lambda* (command #:key (options '())
                     (output (current-output-port))
                     (error (current-error-port)))
     (spawn ssh (ssh-arguments destination command
-                              #:key key #:socat socat #:cid cid #:port port
+                              #:key key #:known-hosts known-hosts
+                              #:socat socat #:cid cid #:port port
                               #:send-env send-env #:options options)
            #:environment environment #:output output #:error error)))
 
