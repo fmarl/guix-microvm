@@ -62,6 +62,12 @@ The system needs `microvm-guest-service-type` from `%microvm-base-services`.
 Its fields are `user`, `uid`, `gid`, `ssh-port`, `network` and
 `name-server`.
 
+### Environment
+- `VM_MEMORY`, `VM_CPUS`: override `memory-size` (MiB) and `cpu-count`
+- `VM_BOOT_TIMEOUT`: seconds to wait for SSH, by default 120
+- `VM_FS_CACHE`: virtiofsd's `--cache` mode, by default `auto`
+- `VM_SERIAL`: QEMU `-serial` for the console instead of the log
+
 ### Claude Code
 ```
 guix microvm --vm=claude-vm -- claude setup-token
