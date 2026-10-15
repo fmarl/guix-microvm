@@ -1,8 +1,6 @@
 # guix-microvm
 Runs commands in a Guix System VM per project.  The VM sees the project at
-`/work`, its own home and the packages of `manifest.scm`.  Existing `.git`
-directories appear empty and `.git` files are read-only.  The VM can still
-create a new `.git`, whose hooks Git on the host would run.
+`/work`, its own home and the packages of `manifest.scm`.
 
 ## Requirements
 - x86_64 with `/dev/kvm` and `/dev/vhost-vsock`
@@ -53,7 +51,8 @@ parents.  They run on the host, so they must be allowed after every change.
 ```
 
 `microvm` fields: `operating-system`, `command`, `wayland?`, `stateless?`,
-`usb?`, `network?`, `ports`, `secrets`, `memory-size`, `cpu-count`.
+`usb?`, `network?`, `ports`, `secrets`, `read-only-files`, `memory-size`,
+`cpu-count`.  `.git` and `read-only-files` are read-only in the VM.
 
 The system needs `microvm-guest-service-type` from `%microvm-base-services`.
 Its fields are `user`, `uid`, `gid`, `ssh-port`, `network` and

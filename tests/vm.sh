@@ -30,7 +30,8 @@ trap 'rm -rf "$project" "$out" "$state" "$state.log" \
             "$state%2Fusb" "$state%2Fusb.log" \
             "$state%2Fgit" "$state%2Fgit.log" \
             "$state%2Fworktree" "$state%2Fworktree.log" \
-            "$state%2Foffline" "$state%2Foffline.log"' EXIT
+            "$state%2Foffline" "$state%2Foffline.log" \
+            "$state%2Fprotected" "$state%2Fprotected.log"' EXIT
 cd "$project" || exit 1
 
 check() {
@@ -157,25 +158,43 @@ EOF
     [ $? -eq 9 ] && grep -q '^attached' "$out"
 }
 
-# The VM sees empty .git directories, nested ones too, and cannot change
-# .git files, such as those of submodules.
-git_hidden() {
-    mkdir -p git/.git git/nested/.git git/sub worktree
+# The VM can read .git directories, nested ones too, and .git files, such
+# as those of submodules, but not change them or add hooks.
+git_read_only() {
+    mkdir -p git/.git/hooks git/nested/.git git/sub worktree
     printf '[core]\n\tbare = false\n' > git/.git/config
     echo 'gitdir: ../.git/modules/sub' > git/sub/.git
     echo 'gitdir: /nowhere' > worktree/.git
     (cd git &&
          status_is 7 microvm -- sh -c '
-           test -z "$(ls -A /work/.git)" && ! touch /work/.git/config &&
-           ! rmdir /work/.git && ! mv /work/.git /work/moved &&
+           grep -q bare /work/.git/config && ! touch /work/.git/config &&
+           ! touch /work/.git/hooks/pre-commit &&
+           ! rmdir /work/.git/hooks && ! mv /work/.git /work/moved &&
            ! touch /work/nested/.git/config &&
            ! echo x >> /work/sub/.git && ! rm /work/sub/.git && exit 7') &&
         (cd worktree &&
              status_is 8 microvm -- sh -c '
                grep -q nowhere /work/.git && ! echo x >> /work/.git &&
                ! rm /work/.git && exit 8') &&
-        grep -q bare git/.git/config &&
+        test -z "$(ls -A git/.git/hooks)" &&
         test "$(cat worktree/.git)" = 'gitdir: /nowhere'
+}
+
+# The VM cannot change the files in 'read-only-files'.
+read_only_files() {
+    mkdir -p protected/conf
+    echo kept > protected/.envrc
+    echo '(microvm (operating-system %base-vm)
+                    (read-only-files (list ".envrc" "conf" "missing")))' \
+         > protected/vm.scm
+    (cd protected &&
+         status_is 11 with_environment XDG_CONFIG_HOME="$project/config" \
+                   microvm --allow -- sh -c '
+           grep -q kept /work/.envrc && ! echo x >> /work/.envrc &&
+           ! rm /work/.envrc && ! mv /work/conf /work/moved &&
+           ! touch /work/conf/new && touch /work/missing && exit 11') &&
+        test "$(cat protected/.envrc)" = kept &&
+        test -z "$(ls -A protected/conf)"
 }
 
 # The guest boots without network, its eth0 unconnected.
@@ -211,7 +230,8 @@ check "boot failure shows the console" \
 check "SIGTERM stops the VM" sigterm_stops_vm
 check "vm.scm: guest configuration" guest_configuration
 check "USB: hotplug" usb_hotplug
-check ".git is hidden" git_hidden
+check ".git is read-only" git_read_only
+check "read-only files" read_only_files
 check "no network" offline
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then

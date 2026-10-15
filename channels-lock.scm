@@ -12,7 +12,7 @@
        (name 'sagittarius)
        (url "https://codeberg.org/fmarl/sagittarius")
        (branch "main")
-       (commit "392b29f2f567bb186570306dce40d675562646c9")
+       (commit "4df432d428dd6359949aebd40f6401e23c4cf750")
        (introduction
         (make-channel-introduction
          "c2302ace8d0b0d16a01668399889c9d796af5777"

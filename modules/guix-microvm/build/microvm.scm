@@ -38,6 +38,7 @@
   (cpu-count        vm-config-cpu-count)
   (network-options  vm-config-network-options)  ;passt's | #f
   (secrets          vm-config-secrets)
+  (read-only-files  vm-config-read-only-files)
   (usb?             vm-config-usb?)
   (user             vm-config-user)
   (uid              vm-config-uid)
@@ -46,17 +47,18 @@
 
 (define-record-type* <tools> tools make-tools
   tools?
-  (qemu        tools-qemu)
-  (virtiofsd   tools-virtiofsd)
-  (passt       tools-passt)
-  (waypipe     tools-waypipe)                   ;#f without Wayland
-  (ssh         tools-ssh)
-  (ssh-keygen  tools-ssh-keygen)
-  (socat       tools-socat)
-  (git         tools-git)
-  (unshare     tools-unshare)
-  (mount-store tools-mount-store)
-  (hide-git    tools-hide-git))
+  (qemu            tools-qemu)
+  (virtiofsd       tools-virtiofsd)
+  (passt           tools-passt)
+  (waypipe         tools-waypipe)               ;#f without Wayland
+  (guest-waypipe   tools-guest-waypipe)         ;#f without Wayland
+  (ssh             tools-ssh)
+  (ssh-keygen      tools-ssh-keygen)
+  (socat           tools-socat)
+  (git             tools-git)
+  (unshare         tools-unshare)
+  (mount-store     tools-mount-store)
+  (mount-read-only tools-mount-read-only))
 
 (define-record-type* <invocation> invocation make-invocation
   invocation?
@@ -439,9 +441,9 @@ it is graphical."
                   (exit (+ 128 signal)))))
             (list SIGINT SIGTERM SIGHUP)))
 
-(define (run-vm tmp invocation config tools git-entries)
-  "Run INVOCATION of the VM CONFIG with TOOLS and hide GIT-ENTRIES.  Keep
-sockets and runtime files in TMP.  Return the exit status of the command."
+(define (run-vm tmp invocation config tools read-only)
+  "Run INVOCATION of the VM CONFIG in TMP and return the command's exit
+status."
   (match-record invocation <invocation> (directory command stateless? cache)
     (match-record config <vm-config> (name uid gid usb? store-items)
       (let* ((data (data-directory (home-directory)))
@@ -451,11 +453,12 @@ sockets and runtime files in TMP.  Return the exit status of the command."
                                 #:store-items store-items
                                 #:stateless? stateless? #:uid uid #:gid gid
                                 #:mount-store (tools-mount-store tools)
-                                #:hide-git (tools-hide-git tools)
-                                #:git-entries git-entries))
+                                #:mount-read-only (tools-mount-read-only tools)
+                                #:read-only read-only))
              (wayland-servers wrapper forward-options
                               (wayland-forwarding
-                               (tools-waypipe tools) name
+                               (tools-waypipe tools)
+                               (tools-guest-waypipe tools) name
                                (socket-file tmp "waypipe")
                                (string-append (guest-runtime-directory uid)
                                               "/waypipe.sock")))
@@ -498,8 +501,12 @@ sockets and runtime files in TMP.  Return the exit status of the command."
      (lambda ()
        (let ((invocation (parse-invocation args config)))
          (check-host invocation (vm-config-name config) (tools-waypipe tools))
-         (let ((git-entries
-                (entries-to-hide (invocation-directory invocation))))
+         (let* ((directory (invocation-directory invocation))
+                (read-only (read-only-files
+                            (append (find-git-entries directory)
+                                    (map (cut string-append directory "/" <>)
+                                         (vm-config-read-only-files
+                                          config))))))
            (exit-on-signals!)
            (call-with-temporary-directory (runtime-directory)
-             (cut run-vm <> invocation config tools git-entries))))))))
+             (cut run-vm <> invocation config tools read-only))))))))
