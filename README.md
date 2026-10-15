@@ -1,26 +1,16 @@
 # guix-microvm
 Runs commands in a Guix System VM per project.  The VM sees the project at
-`/work`, its own home and the packages of `manifest.scm`.
+`/work`, has its own home and gets the packages of `manifest.scm`.
 
-## Requirements
-- x86_64 with `/dev/kvm` and `/dev/vhost-vsock`
-- unprivileged user namespaces
-- Landlock
-- a Wayland session for graphical VMs
+Needs x86_64 with `/dev/kvm` and `/dev/vhost-vsock`, unprivileged user
+namespaces and Landlock.
 
-## Installation
 ```scheme
 (cons (channel
         (name 'guix-microvm)
-        (url "https://codeberg.org/fmarl/guix-microvm")
+        (url "https://github.com/fmarl/guix-microvm")
         (branch "main"))
       %default-channels)
-```
-
-From a checkout:
-
-```
-GUILE_LOAD_PATH=$PWD/modules guix time-machine -C channels-lock.scm -- microvm
 ```
 
 ## Usage
@@ -28,72 +18,46 @@ GUILE_LOAD_PATH=$PWD/modules guix time-machine -C channels-lock.scm -- microvm
 guix microvm                            # login shell in /work
 guix microvm -- make check              # run a command
 guix microvm -p 3000 -- npm run dev     # forward localhost:3000
-guix microvm --stateless -- make check  # discard home and changes to /work
-guix microvm --vm=claude-vm -- claude
-guix microvm --vm=librewolf-vm
-guix microvm --allow                    # allow new or changed project files
+guix microvm --stateless -- make check  # throw away home and changes
+guix microvm --allow                    # trust new or changed project files
+guix microvm --vm=NAME                  # run a predefined microvm
 guix microvm list                       # running VMs
-guix microvm stop vm
+guix microvm stop NAME
 ```
 
-`vm.scm` and `manifest.scm` are searched in the current directory and its
-parents.  They run on the host, so they must be allowed after every change.
+Predefined microvms come from `(CHANNEL vms ...)` modules of any channel.
+
+`vm.scm` and `manifest.scm` are looked up from the current directory upwards.
+They run on the host, so every change has to be allowed again.
 
 ```scheme
-;; manifest.scm
-(specifications->manifest (list "node" "python"))
-
 ;; vm.scm
-(use-modules (guix-microvm vms claude))
-
 (microvm
-  (operating-system %claude-system)
+  (operating-system %base-vm)
   (memory-size 8192)
   (ports '(3000)))
 ```
 
-`microvm` fields: `operating-system`, `command`, `wayland?`, `stateless?`,
-`usb?`, `network?`, `ports`, `secrets`, `read-only-files`, `memory-size`,
-`cpu-count`.  `.git`, `.envrc`, `.dir-locals.el`, `.dir-locals-2.el`,
-`.vscode`, `.idea` and `read-only-files` are read-only in the VM.  The
-launcher warns about new ones when the VM exits.
+`.git`, `.envrc`, `.dir-locals.el`, `.dir-locals-2.el`, `.vscode`, `.idea`
+and the `read-only-files` of the `microvm` are read-only in the VM.  The
+launcher warns about new ones when the VM exits.  Home, console log and
+`secrets` live in `~/.local/share/guix-microvm/NAME/`.
 
-The system needs `microvm-guest-service-type` from `%microvm-base-services`.
-Its fields are `user`, `uid`, `gid`, `ssh-port`, `network` and
-`name-server`.
+`VM_MEMORY` and `VM_CPUS` override `memory-size` (MiB) and `cpu-count`,
+`VM_BOOT_TIMEOUT` the 120 seconds to wait for SSH, `VM_FS_CACHE` virtiofsd's
+`--cache` mode (`auto`) and `VM_SERIAL` sends the console to a QEMU `-serial`
+instead of the log.
 
-### Environment
-- `VM_MEMORY`, `VM_CPUS`: override `memory-size` (MiB) and `cpu-count`
-- `VM_BOOT_TIMEOUT`: seconds to wait for SSH, by default 120
-- `VM_FS_CACHE`: virtiofsd's `--cache` mode, by default `auto`
-- `VM_SERIAL`: QEMU `-serial` for the console instead of the log
-
-### Claude Code
-```
-guix microvm --vm=claude-vm -- claude setup-token
-mkdir -p ~/.local/share/guix-microvm/claude/secrets
-echo TOKEN > ~/.local/share/guix-microvm/claude/secrets/CLAUDE_CODE_OAUTH_TOKEN
-```
-
-### USB
-VMs with `usb?` can take a host device until it is detached or the VM
-exits.  The device needs a udev rule that gives you access.
+VMs with `usb?` can take a host device, which needs a udev rule giving you
+access:
 
 ```
 guix microvm usb attach librewolf 1050
 guix microvm usb detach librewolf 1050
 ```
 
-## Files
-- `~/.local/share/guix-microvm/NAME/PROJECT/`: home
-- `~/.local/share/guix-microvm/NAME/PROJECT.log`: console log
-- `~/.local/share/guix-microvm/NAME/secrets/`: values of `secrets`
-
-Stateless VMs keep home and log in `$XDG_RUNTIME_DIR` until they exit.
-
 ## Development
 ```
-make check     # evaluate VMs, unit tests
+make check     # unit tests, lint
 make check-vm  # boot VMs
-make update    # update channels-lock.scm
 ```

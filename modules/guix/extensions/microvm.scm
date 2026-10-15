@@ -28,6 +28,7 @@
   #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
   #:use-module (ice-9 eval-string)
   #:use-module ((ice-9 exceptions) #:select (exception-kind exception-args))
+  #:use-module ((ice-9 ftw) #:select (scandir))
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
   #:use-module ((rnrs bytevectors) #:select (string->utf8 utf8->string))
@@ -53,7 +54,8 @@ Or list the running microvms, or stop the running microvm NAME.
 Or give the running microvm NAME the host's USB device with the hexadecimal
 IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
   (display (G_ "
-      --vm=NAME          run the predefined microvm NAME, e.g. claude-vm"))
+      --vm=NAME          run the microvm NAME that a (CHANNEL vms ...)
+                         module exports"))
   (display (G_ "
   -p, --port=PORT[:GUEST-PORT]
                          forward PORT on the host's loopback to GUEST-PORT,
@@ -122,9 +124,28 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
               (() '())
               ((_ command ...) command)))))
 
+(define (vm-module-directories)
+  "Return the CHANNEL/vms directories of %load-path, as pairs of the
+directory in %load-path and CHANNEL/vms."
+  (define (directory? file)
+    (and=> (stat file #f)
+           (lambda (st)
+             (eq? 'directory (stat:type st)))))
+
+  (append-map (lambda (directory)
+                (filter-map (lambda (name)
+                              (let ((sub (string-append name "/vms")))
+                                (and (directory? (string-append directory
+                                                                "/" sub))
+                                     (cons directory sub))))
+                            (or (scandir directory
+                                         (negate (cut member <> '("." ".."))))
+                                '())))
+              %load-path))
+
 (define (predefined-microvms)
-  "Return the microvms the (guix-microvm vms ...) modules export, as an alist
-by name."
+  "Return the microvms the (CHANNEL vms ...) modules export, as an alist by
+name."
   (fold-module-public-variables*
    (lambda (module symbol variable result)
      (let ((value (variable-ref variable)))
@@ -132,7 +153,7 @@ by name."
            (alist-cons (symbol->string symbol) value result)
            result)))
    '()
-   (all-modules (map (cut cons <> "guix-microvm/vms") %load-path))))
+   (all-modules (vm-module-directories))))
 
 (define (lookup-microvm name)
   (let ((microvms (predefined-microvms)))

@@ -117,6 +117,15 @@ EOF
                                    dev:1001:/home/dev && exit 6')
 }
 
+wayland_socket() {
+    mkdir wayland
+    echo '(microvm (operating-system %base-vm) (wayland? #t))' > wayland/vm.scm
+    (cd wayland &&
+         status_is 5 with_environment XDG_CONFIG_HOME="$project/config" \
+                   microvm --allow --stateless -- \
+                   sh -c 'test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && exit 5')
+}
+
 # An emulated USB device stands in for one of the host.
 usb_hotplug() {
     mkdir usb
@@ -245,9 +254,7 @@ check "new protected entries are reported" new_protected_entries
 check "no network" offline
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    check "Wayland: exit status" \
-          status_is 5 microvm --vm=librewolf-vm --stateless -- \
-          sh -c 'test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && exit 5'
+    check "Wayland: exit status" wayland_socket
 else
     echo "SKIP: Wayland: exit status (no WAYLAND_DISPLAY)"
 fi

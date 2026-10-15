@@ -4,11 +4,11 @@
  (news-file "news.scm")
  (dependencies
   (channel
-   (name sagittarius)
-   (url "https://codeberg.org/fmarl/sagittarius")
+   (name guix-cage)
+   (url "https://github.com/fmarl/guix-cage")
    (branch "main")
    (introduction
     (channel-introduction
      (version 0)
-     (commit "c2302ace8d0b0d16a01668399889c9d796af5777")
+     (commit "56a634b5aae8a3c4e12a292ba87ac336a27ddcbc")
      (signer "F2E3 8B47 808B AF7B 81D5  B27F 52C5 7B54 89B5 819D"))))))

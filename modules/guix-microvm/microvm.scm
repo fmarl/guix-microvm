@@ -22,7 +22,7 @@
   #:use-module ((gnu services configuration) #:select (list-of))
   #:use-module (gnu system)
   #:use-module (gnu system file-systems)
-  #:use-module (sagittarius locked virtualization)
+  #:use-module (guix-microvm locked)
   #:use-module (guix-microvm packages virtiofsd)
   #:use-module (guix-microvm base)
   #:export (microvm
@@ -268,6 +268,8 @@ shares DIR at /work and runs COMMAND there."
               (user #$(microvm-guest-configuration-user guest))
               (uid #$(microvm-guest-configuration-uid guest))
               (gid #$(microvm-guest-configuration-gid guest))
+              (guest-runtime-directory
+               #$(microvm-guest-runtime-directory guest))
               (ssh-port #$(microvm-guest-configuration-ssh-port guest)))
             (tools
               (qemu #$(file-append qemu-locked "/bin/qemu-system-x86_64"))
