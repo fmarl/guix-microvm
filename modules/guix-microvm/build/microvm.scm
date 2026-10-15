@@ -258,11 +258,12 @@ PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
   `("LANG" "COLORTERM" "GIT_AUTHOR_*" "GIT_COMMITTER_*" "GUIX_MICROVM_PROFILE"
     ,@secrets))
 
-(define (vm-ssh-spawner config tools data directory key cid)
+(define (vm-ssh-spawner config tools data directory key known-hosts cid)
   "Return the procedure that runs commands in the VM CONFIG over SSH."
   (match-record config <vm-config> (name user ssh-port profile secrets)
     (ssh-spawner (tools-ssh tools) (string-append user "@" name)
-                 #:key key #:socat (tools-socat tools) #:cid cid
+                 #:key key #:known-hosts known-hosts
+                 #:socat (tools-socat tools) #:cid cid
                  #:port ssh-port
                  #:send-env (send-env-patterns secrets)
                  #:environment
@@ -453,9 +454,10 @@ status."
     (match-record config <vm-config> (name uid gid usb? store-items)
       (let* ((data (data-directory (home-directory)))
              (home log key (vm-files data tmp name directory stateless?))
+             (host-key (string-append tmp "/ssh_host_ed25519_key"))
              (shares (vm-shares #:directory directory #:home home
                                 #:store (string-append tmp "/store")
-                                #:store-items store-items
+                                #:store-items store-items #:host-key host-key
                                 #:stateless? stateless? #:uid uid #:gid gid
                                 #:mount-store (tools-mount-store tools)
                                 #:mount-read-only (tools-mount-read-only tools)
@@ -474,9 +476,11 @@ status."
                                #:unshare (tools-unshare tools)
                                #:virtiofsd (tools-virtiofsd tools)
                                #:cache cache)))
+             (known-hosts (string-append tmp "/known_hosts"))
              (cid (vm-cid))
              (key-blob (ssh-key-blob (tools-ssh-keygen tools) key))
-             (spawn-ssh (vm-ssh-spawner config tools data directory key cid))
+             (spawn-ssh (vm-ssh-spawner config tools data directory key
+                                        known-hosts cid))
              (status-file (guest-status-file uid)))
         (define (boot qemu)
           (boot-and-run spawn-ssh qemu
@@ -495,6 +499,8 @@ status."
               log
             boot))
 
+        (write-known-hosts known-hosts
+                           (ssh-key-blob (tools-ssh-keygen tools) host-key))
         (for-each mkdir-p (map share-directory shares))
         (call-with-vm-info tmp `((name . ,name)
                                  (directory . ,directory)

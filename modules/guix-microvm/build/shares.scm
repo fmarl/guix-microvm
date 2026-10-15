@@ -46,8 +46,9 @@ HOST-GID in its user namespace."
   (call-with-input-file (string-append "/proc/sys/kernel/overflow" kind)
     read))
 
-(define* (vm-shares #:key directory home store store-items stateless? uid gid
-                    mount-store mount-read-only (read-only '()))
+(define* (vm-shares #:key directory home store store-items host-key
+                    stateless? uid gid mount-store mount-read-only
+                    (read-only '()))
   "Return the shares of STORE-ITEMS, DIRECTORY and HOME."
   (let ((owned (id-map-options uid gid 0 0)))
     (list
@@ -55,7 +56,7 @@ HOST-GID in its user namespace."
      (share "store" store
             (cons "--readonly"
                   (id-map-options 0 0 (overflow-id "uid") (overflow-id "gid")))
-            (list mount-store store-items store "--"))
+            (list mount-store store-items host-key store "--"))
      ;; A stateless VM overlays it with a tmpfs.
      (share "work" directory
             (if stateless? (cons "--readonly" owned) owned)
@@ -97,10 +98,14 @@ HOST-GID in its user namespace."
                 (virtiofs-device share (share-socket directory share)))
               shares))
 
-(define (mount-store-items items root)
-  "Bind-mount the store items listed in ITEMS on a tmpfs at ROOT.  Needs a
-private mount namespace."
+;; Same as in (guix-microvm base).
+(define %host-key-name ".guix-microvm-ssh-host-key")
+
+(define (mount-store-items items host-key root)
+  "Bind-mount the store items listed in ITEMS on a tmpfs at ROOT, and copy
+HOST-KEY there.  Needs a private mount namespace."
   (mount "none" root "tmpfs" 0 "mode=755")
+  (copy-file host-key (string-append root "/" %host-key-name))
   (for-each (lambda (item)
               (let ((target (string-append root "/" (basename item))))
                 (if (file-is-directory? item)

@@ -348,7 +348,7 @@ sleep."
            '("link/file" "dangling")))))
 
 (test-equal "vm-shares"
-  '((("store" "/s" #t ("/mount-store" "/items" "/s" "--"))
+  '((("store" "/s" #t ("/mount-store" "/items" "/k" "/s" "--"))
      ("work" "/p" #f ("/mount-read-only" "/p/.git" "--"))
      ("home" "/h" #f ()))
     (#t ("--readonly" "--translate-uid" "map:1000:0:1"
@@ -358,13 +358,13 @@ sleep."
                 (values
                  (vm-shares #:directory "/p" #:home "/h" #:stateless? #f
                             #:uid 1000 #:gid 100 #:store "/s"
-                            #:store-items "/items"
+                            #:store-items "/items" #:host-key "/k"
                             #:mount-store "/mount-store"
                             #:mount-read-only "/mount-read-only"
                             #:read-only '("/p/.git"))
                  (vm-shares #:directory "/p" #:home "/h" #:stateless? #t
                             #:uid 1000 #:gid 100 #:store "/s"
-                            #:store-items "/items"
+                            #:store-items "/items" #:host-key "/k"
                             #:mount-store "/mount-store"
                             #:mount-read-only "/mount-read-only"))))
     (list (map (lambda (share)
