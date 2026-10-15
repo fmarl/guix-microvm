@@ -27,7 +27,10 @@ state=${XDG_DATA_HOME:-$HOME/.local/share}/guix-microvm/vm/$(
     printf %s "$project" | sed 's|/|%2F|g')
 trap 'rm -rf "$project" "$out" "$state" "$state.log" \
             "$state%2Fcustom" "$state%2Fcustom.log" \
-            "$state%2Fusb" "$state%2Fusb.log"' EXIT
+            "$state%2Fusb" "$state%2Fusb.log" \
+            "$state%2Fgit" "$state%2Fgit.log" \
+            "$state%2Fworktree" "$state%2Fworktree.log" \
+            "$state%2Foffline" "$state%2Foffline.log"' EXIT
 cd "$project" || exit 1
 
 check() {
@@ -154,6 +157,37 @@ EOF
     [ $? -eq 9 ] && grep -q '^attached' "$out"
 }
 
+# The VM sees empty .git directories, nested ones too, and cannot change
+# .git files, such as those of submodules.
+git_hidden() {
+    mkdir -p git/.git git/nested/.git git/sub worktree
+    printf '[core]\n\tbare = false\n' > git/.git/config
+    echo 'gitdir: ../.git/modules/sub' > git/sub/.git
+    echo 'gitdir: /nowhere' > worktree/.git
+    (cd git &&
+         status_is 7 microvm -- sh -c '
+           test -z "$(ls -A /work/.git)" && ! touch /work/.git/config &&
+           ! rmdir /work/.git && ! mv /work/.git /work/moved &&
+           ! touch /work/nested/.git/config &&
+           ! echo x >> /work/sub/.git && ! rm /work/sub/.git && exit 7') &&
+        (cd worktree &&
+             status_is 8 microvm -- sh -c '
+               grep -q nowhere /work/.git && ! echo x >> /work/.git &&
+               ! rm /work/.git && exit 8') &&
+        grep -q bare git/.git/config &&
+        test "$(cat worktree/.git)" = 'gitdir: /nowhere'
+}
+
+# The guest boots without network, its eth0 unconnected.
+offline() {
+    mkdir offline
+    echo '(microvm (operating-system %base-vm) (network? #f))' \
+         > offline/vm.scm
+    (cd offline &&
+         status_is 10 with_environment XDG_CONFIG_HOME="$project/config" \
+                   microvm --allow -- sh -c 'exit 10')
+}
+
 before=$(temporary_directories)
 
 check "exit status" \
@@ -177,6 +211,8 @@ check "boot failure shows the console" \
 check "SIGTERM stops the VM" sigterm_stops_vm
 check "vm.scm: guest configuration" guest_configuration
 check "USB: hotplug" usb_hotplug
+check ".git is hidden" git_hidden
+check "no network" offline
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
     check "Wayland: exit status" \

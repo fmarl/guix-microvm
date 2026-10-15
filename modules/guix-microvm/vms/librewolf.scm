@@ -30,6 +30,5 @@
     (operating-system %librewolf-system)
     (command '("dbus-run-session" "--" "librewolf"))
     (wayland? #t)
-    ;; For security keys, see 'guix microvm usb'.
     (usb? #t)
     (memory-size 6144)))

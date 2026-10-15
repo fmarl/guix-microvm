@@ -11,6 +11,8 @@
   #:use-module (guix scripts build)
   #:use-module ((guix status) #:select (with-status-verbosity))
   #:use-module (guix store)
+  #:use-module ((guix diagnostics)
+                #:select (formatted-message &fix-hint))
   #:use-module (guix ui)
   #:use-module ((guix utils)
                 #:select (config-directory with-atomic-file-output))
@@ -21,7 +23,8 @@
   #:use-module (guix-microvm microvm)
   #:use-module (guix-microvm control)
   #:use-module ((guix-microvm build microvm)
-                #:select (home-directory contains-home? wait-for-exit))
+                #:select (check-shareable))
+  #:use-module ((guix-microvm build process) #:select (wait-for-exit))
   #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
   #:use-module (ice-9 eval-string)
   #:use-module ((ice-9 exceptions) #:select (exception-kind exception-args))
@@ -31,6 +34,7 @@
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:use-module (srfi srfi-34)
+  #:use-module ((srfi srfi-35) #:select (condition make-compound-condition))
   #:use-module (srfi srfi-37)
   #:use-module (srfi srfi-71)
   #:export (guix-microvm))
@@ -77,7 +81,7 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
                    (alist-cons 'vm arg result)))
          (option '(#\p "port") #t #f
                  (lambda (opt name arg result)
-                   (alist-cons 'port (string->port arg) result)))
+                   (alist-cons 'port (string->forwarded-port arg) result)))
          (option '("share-home") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'share-home? #t result)))
@@ -183,7 +187,7 @@ bytevectors, leaving out missing ones."
            %project-file-names)
       "\n")))))
 
-(define (allowed-project line)
+(define (line->allowed-project line)
   "Parse LINE of the allowed file into a directory and digest pair, or #f."
   (match (string-index line #\space)
     (#f #f)
@@ -194,7 +198,7 @@ bytevectors, leaving out missing ones."
   "Return the allowed projects as an alist of directories and digests."
   (catch 'system-error
     (lambda ()
-      (filter-map allowed-project
+      (filter-map line->allowed-project
                   (string-split (call-with-input-file (allowed-file)
                                   get-string-all)
                                 #\newline)))
@@ -221,35 +225,43 @@ bytevectors, leaving out missing ones."
          (cut cons (string-append project "/" name) <>)))
 
 (define (project-files opts project contents)
-  "Return vm.scm, unless OPTS name a predefined microvm, and manifest.scm, as
-'project-file' does."
+  "Return vm.scm, unless OPTS name a predefined microvm, and manifest.scm of
+PROJECT, each paired with its contents, or #f."
   (values (and (not (assoc-ref opts 'vm))
                (project-file project contents "vm.scm"))
           (project-file project contents "manifest.scm")))
 
 (define (ensure-allowed project contents)
   (unless (project-allowed? project contents)
-    (report-error (G_ "not loading vm.scm and manifest.scm from '~a': \
-they are new or changed~%")
-                  project)
-    (display-hint (G_ "They run on the host, and the VM can change them.
-Review them, then run @command{guix microvm --allow}."))
-    (exit 1)))
+    (raise
+     (make-compound-condition
+      (formatted-message (G_ "not loading vm.scm and manifest.scm from '~a': \
+they are new or changed")
+                         project)
+      (condition
+       (&fix-hint
+        (hint (G_ "They run on the host, and the VM can change them.
+Review them, then run @command{guix microvm --allow}."))))))))
 
 (define (eval-file file bytes modules)
   "Evaluate BYTES, read from FILE, in a new module using MODULES.  Return the
 last value."
   ;; Guix conditions and 'leave' go on to 'with-error-handling'.
   (guard (error ((not (memq (exception-kind error) '(quit %exception)))
-                 (report-error (G_ "failed to load '~a':~%") file)
-                 (print-exception (current-error-port) #f
-                                  (exception-kind error)
-                                  (exception-args error))
-                 (exit 1)))
+                 (raise
+                  (formatted-message
+                   (G_ "failed to load '~a': ~a")
+                   file
+                   (string-trim-right
+                    (call-with-output-string
+                      (cut print-exception <> #f
+                           (exception-kind error)
+                           (exception-args error))))))))
+    ;; Not compiled: 'eval-string' would compile in a fresh module, without
+    ;; MODULES.
     (eval-string (utf8->string bytes)
                  #:module (make-user-module modules)
-                 #:file file
-                 #:compile? #t)))
+                 #:file file)))
 
 (define (load-object file kind valid? modules)
   "Evaluate FILE, from 'project-file', in MODULES.  Return the value, failing
@@ -269,7 +281,7 @@ unless VALID? says it is a KIND."
 (define (load-manifest file)
   (load-object file "manifest" manifest? '((guix profiles) (gnu))))
 
-(define (string->port str)
+(define (string->forwarded-port str)
   (match (map string->number (string-split str #\:))
     (((? integer? port)) port)
     (((? integer? host) (? integer? guest)) (cons host guest))
@@ -320,7 +332,8 @@ file name, unless OPTS ask for a dry run."
             ;; With nothing to build, 'build-notifier' lets a dry run get
             ;; this far.
             (unless (assoc-ref opts 'dry-run?)
-              ;; Until the store connection is closed.
+              ;; Keep the garbage collector off it until the store
+              ;; connection closes.
               (add-temp-root store launcher)
               (proc launcher))))))))
 
@@ -340,11 +353,8 @@ status."
       (allow-project! project contents))
     (when (or vm-file manifest-file)
       (ensure-allowed project contents))
-    (when (and (contains-home? directory (home-directory))
-               (not (assoc-ref opts 'share-home?)))
-      (leave (G_ "not sharing ~a, which contains the home directory, \
-without --share-home~%")
-             directory))
+    ;; Fail before building the launcher, which checks it too.
+    (check-shareable directory (assoc-ref opts 'share-home?))
     (call-with-launcher opts (options->microvm opts vm-file manifest-file)
       (lambda (launcher)
         (exit (run-launcher launcher directory command
@@ -367,13 +377,15 @@ the current project."
 
 (define (control-usb args)
   "Attach or detach a host USB device as ARGS say."
+  (define (control action name str)
+    (let ((id (or (string->usb-id str)
+                  (leave (G_ "~a: expected VENDOR or VENDOR:PRODUCT~%")
+                         str))))
+      (action (find-running-vm name) id)))
+
   (match args
-    (((and action (or "attach" "detach")) name id)
-     (let* ((id (or (string->usb-id id)
-                    (leave (G_ "~a: expected VENDOR or VENDOR:PRODUCT~%")
-                           id)))
-            (vm (find-running-vm name)))
-       ((if (string=? action "attach") attach-usb! detach-usb!) vm id)))
+    (("attach" name id) (control attach-usb! name id))
+    (("detach" name id) (control detach-usb! name id))
     (_
      (leave (G_ "usage: guix microvm usb attach|detach NAME \
 VENDOR[:PRODUCT]~%")))))
