@@ -41,7 +41,7 @@
   invocation-share-home? invocation-memory invocation-cpus vm-files
   git-config git-identity read-secrets environment-with serial-options
   qemu-arguments vm-kernel-arguments open-log call-with-temporary-directory
-  printable contains-home?)
+  printable contains-home? warn-about-new-protected-entries)
 
 (define-private (guix-microvm microvm)
   passt-port-options passt-network-options microvm-network-options
@@ -333,6 +333,14 @@ sleep."
       (let ((status (exit-code (cut find-protected-entries project))))
         (rmdir locked)
         status)))
+
+  (test-equal "warn-about-new-protected-entries"
+    (string-append "run-vm: warning: the VM created " (absolute "n/.envrc")
+                   "\n")
+    (let ((old (find-protected-entries project)))
+      (write-file (absolute "n/.envrc") "")
+      (with-error-to-string
+       (cut warn-about-new-protected-entries project old))))
 
   (test-equal "read-only-files"
     '("/.envrc" "/a/file")
