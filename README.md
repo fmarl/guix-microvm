@@ -54,7 +54,8 @@ parents.  They run on the host, so they must be allowed after every change.
 
 `microvm` fields: `operating-system`, `command`, `wayland?`, `stateless?`,
 `usb?`, `network?`, `ports`, `secrets`, `read-only-files`, `memory-size`,
-`cpu-count`.  `.git` and `read-only-files` are read-only in the VM.
+`cpu-count`.  `.git`, `.envrc`, `.dir-locals.el`, `.dir-locals-2.el`,
+`.vscode`, `.idea` and `read-only-files` are read-only in the VM.
 
 The system needs `microvm-guest-service-type` from `%microvm-base-services`.
 Its fields are `user`, `uid`, `gid`, `ssh-port`, `network` and

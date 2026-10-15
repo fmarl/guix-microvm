@@ -22,7 +22,7 @@
             share-devices
             virtiofs-device
             mount-store-items
-            find-git-entries
+            find-protected-entries
             read-only-files
             mount-read-only))
 
@@ -114,17 +114,21 @@ HOST-KEY there.  Needs a private mount namespace."
                 (mount item target "none" (logior MS_BIND MS_REC))))
             (string-tokenize (call-with-input-file items get-string-all))))
 
+;; Tools on the host run code from them.
+(define %protected-names
+  '(".git" ".envrc" ".dir-locals.el" ".dir-locals-2.el" ".vscode" ".idea"))
+
 ;; virtiofsd overrides permissions on the user's files, so it can read
 ;; directories that the user cannot.
-(define (find-git-entries directory)
-  "Return the .git entries in DIRECTORY and its subdirectories, not looking
-into .git directories.  Fail on a directory of the user that cannot be
+(define (find-protected-entries directory)
+  "Return the %PROTECTED-NAMES entries in DIRECTORY and its subdirectories,
+not looking into them.  Fail on a directory of the user that cannot be
 read."
-  (define (git? file)
-    (string=? (basename file) ".git"))
+  (define (protected? file)
+    (member (basename file) %protected-names))
 
-  (define (add-if-git file stat result)
-    (if (git? file) (cons file result) result))
+  (define (add-if-protected file stat result)
+    (if (protected? file) (cons file result) result))
 
   (define (keep file stat result)
     result)
@@ -136,11 +140,11 @@ read."
 
   (reverse
    (file-system-fold (lambda (file stat result) ;enter?
-                       (not (git? file)))
-                     add-if-git                  ;leaf
+                       (not (protected? file)))
+                     add-if-protected            ;leaf
                      keep                        ;down
                      keep                        ;up
-                     add-if-git                  ;skip
+                     add-if-protected            ;skip
                      unreadable                  ;error
                      '()
                      directory

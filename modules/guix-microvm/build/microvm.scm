@@ -518,7 +518,7 @@ status."
          (check-host invocation (vm-config-name config) (tools-waypipe tools))
          (let* ((directory (invocation-directory invocation))
                 (read-only (read-only-files
-                            (append (find-git-entries directory)
+                            (append (find-protected-entries directory)
                                     (map (cut string-append directory "/" <>)
                                          (vm-config-read-only-files
                                           config))))))
