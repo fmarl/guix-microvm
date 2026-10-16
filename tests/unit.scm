@@ -320,16 +320,17 @@ sleep."
   (write-file (absolute "a/b/.git/HEAD") "")
   (write-file (absolute "a/file") "")
   (write-file (absolute ".envrc") "")
+  (write-file (absolute "a/.vscode/settings.json") "")
 
-  (test-equal "find-git-entries"
-    '("/.git" "/a/b/.git" "/m/.git")
-    (relative (find-git-entries project)))
+  (test-equal "find-protected-entries"
+    '("/.envrc" "/.git" "/a/.vscode" "/a/b/.git" "/m/.git")
+    (relative (find-protected-entries project)))
 
-  (test-equal "find-git-entries, unreadable directory"
+  (test-equal "find-protected-entries, unreadable directory"
     1
     (let ((locked (absolute "locked")))
       (mkdir locked #o000)
-      (let ((status (exit-code (cut find-git-entries project))))
+      (let ((status (exit-code (cut find-protected-entries project))))
         (rmdir locked)
         status)))
 
