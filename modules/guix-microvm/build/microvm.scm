@@ -507,6 +507,16 @@ status."
                                  (usb? . ,usb?))
           (cut call-with-servers servers start-vm))))))
 
+(define (warn-about-new-protected-entries directory old)
+  (for-each (lambda (file)
+              (format (current-error-port)
+                      "~a: warning: the VM created ~a~%" (%program-name) file))
+            (lset-difference string=?
+                             (or (false-if-exception
+                                  (find-protected-entries directory))
+                                 '())
+                             old)))
+
 (define (run-microvm args config tools)
   "Run the VM CONFIG with TOOLS as the command line ARGS ask: share DIR at
 /work and run COMMAND there.  Return the exit status of COMMAND."
@@ -517,11 +527,17 @@ status."
        (let ((invocation (parse-invocation args config)))
          (check-host invocation (vm-config-name config) (tools-waypipe tools))
          (let* ((directory (invocation-directory invocation))
+                (protected (find-protected-entries directory))
                 (read-only (read-only-files
-                            (append (find-protected-entries directory)
+                            (append protected
                                     (map (cut string-append directory "/" <>)
                                          (vm-config-read-only-files
                                           config))))))
            (exit-on-signals!)
-           (call-with-temporary-directory (runtime-directory)
-             (cut run-vm <> invocation config tools read-only))))))))
+           (dynamic-wind
+             (const #t)
+             (lambda ()
+               (call-with-temporary-directory (runtime-directory)
+                 (cut run-vm <> invocation config tools read-only)))
+             (lambda ()
+               (warn-about-new-protected-entries directory protected)))))))))

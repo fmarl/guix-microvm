@@ -31,7 +31,8 @@ trap 'rm -rf "$project" "$out" "$state" "$state.log" \
             "$state%2Fgit" "$state%2Fgit.log" \
             "$state%2Fworktree" "$state%2Fworktree.log" \
             "$state%2Foffline" "$state%2Foffline.log" \
-            "$state%2Fprotected" "$state%2Fprotected.log"' EXIT
+            "$state%2Fprotected" "$state%2Fprotected.log" \
+            "$state%2Fnew" "$state%2Fnew.log"' EXIT
 cd "$project" || exit 1
 
 check() {
@@ -197,6 +198,14 @@ read_only_files() {
         test -z "$(ls -A protected/conf)"
 }
 
+new_protected_entries() {
+    mkdir new
+    (cd new &&
+         status_is 0 microvm -- sh -c 'mkdir -p sub/.git && touch .envrc') &&
+        grep -q "warning: the VM created $project/new/sub/.git" "$out" &&
+        grep -q "warning: the VM created $project/new/.envrc" "$out"
+}
+
 # The guest boots without network, its eth0 unconnected.
 offline() {
     mkdir offline
@@ -232,6 +241,7 @@ check "vm.scm: guest configuration" guest_configuration
 check "USB: hotplug" usb_hotplug
 check ".git is read-only" git_read_only
 check "read-only files" read_only_files
+check "new protected entries are reported" new_protected_entries
 check "no network" offline
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
