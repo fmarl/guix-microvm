@@ -54,7 +54,8 @@
 (define-private (guix extensions microvm)
   string->forwarded-port launcher-flags project-directory read-project
   project-digest line->allowed-project allowed-projects allow-project!
-  project-allowed? project-file project-files eval-file load-object)
+  project-allowed? project-file project-files eval-file load-object
+  vm-module-directories)
 
 (define-syntax-rule (values->list exp)
   (call-with-values (lambda () exp) list))
@@ -187,7 +188,7 @@ sleep."
                 (cpu-count 4) (network-options #f) (secrets '())
                 (read-only-files '())
                 (usb? #f) (user "u") (uid 1000) (gid 1000)
-                (ssh-port 2222)))))
+                (guest-runtime-directory "/run/user/1000") (ssh-port 2222)))))
         (list (invocation-directory invocation)
               (invocation-command invocation)
               (invocation-stateless? invocation)
@@ -562,6 +563,18 @@ sleep."
                      (set! directory d)
                      (exit 3)))))
     (and directory (not (file-exists? directory)))))
+
+(test-equal "vm-module-directories finds the vms of every channel"
+  `((,tmp . "a/vms") (,tmp . "c/vms"))
+  (let ((saved %load-path))
+    (for-each (lambda (directory)
+                (mkdir-p (string-append tmp "/" directory)))
+              '("a/vms" "b/build" "c/vms"))
+    (dynamic-wind
+      (lambda () (set! %load-path (list tmp)))
+      (lambda () (sort (vm-module-directories)
+                       (lambda (x y) (string<? (cdr x) (cdr y)))))
+      (lambda () (set! %load-path saved)))))
 
 (test-equal "wait-for-exit"
   '(3 143)

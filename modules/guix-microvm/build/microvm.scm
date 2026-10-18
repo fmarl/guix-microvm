@@ -43,6 +43,7 @@
   (user             vm-config-user)
   (uid              vm-config-uid)
   (gid              vm-config-gid)
+  (guest-runtime-directory vm-config-guest-runtime-directory)
   (ssh-port         vm-config-ssh-port))
 
 (define-record-type* <tools> tools make-tools
@@ -131,7 +132,6 @@ environment describe."
       (string-prefix? (string-append directory "/") home)))
 
 (define (check-shareable directory share-home?)
-  "Fail if DIRECTORY contains the home directory, unless SHARE-HOME?."
   (when (and (not share-home?)
              (contains-home? directory (home-directory)))
     (fail "not sharing ~a, which contains the home directory, without \
@@ -191,13 +191,10 @@ exits."
       (force-output port)
       (thunk))))
 
-(define (guest-runtime-directory uid)
-  ;; Same as 'microvm-guest-runtime-directory' in (guix-microvm base).
-  (format #f "/run/user/~a" uid))
-
-;; Only the guest user can write there, so other guest users cannot fake it.
-(define (guest-status-file uid)
-  (string-append (guest-runtime-directory uid) "/guix-microvm-status"))
+(define (guest-status-file guest-runtime-directory)
+  ;; Only the guest user can write there, so other guest users cannot fake
+  ;; it.
+  (string-append guest-runtime-directory "/guix-microvm-status"))
 
 (define (git-config git directory name)
   (let* ((port (with-error-to-port (null-port)
@@ -254,7 +251,6 @@ PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
           (read-secrets secrets-directory secrets)))
 
 (define (send-env-patterns secrets)
-  "Return the SendEnv patterns for ssh, SECRETS included."
   `("LANG" "COLORTERM" "GIT_AUTHOR_*" "GIT_COMMITTER_*" "GUIX_MICROVM_PROFILE"
     ,@secrets))
 
@@ -338,7 +334,6 @@ key KEY-BLOB and whether the VM is STATELESS?."
 
 (define* (vm-qemu-arguments directory invocation config shares
                             #:key key-blob cid log)
-  "Return the QEMU arguments for INVOCATION of the VM CONFIG."
   (match-record invocation <invocation> (stateless? memory cpus serial)
     (match-record config <vm-config> (kernel initrd kernel-arguments usb?)
       (qemu-arguments #:kernel kernel #:initrd initrd
@@ -414,14 +409,6 @@ writes to STATUS-FILE."
                   (%program-name))
           status))))
 
-(define* (boot-and-run spawn-ssh qemu command
-                       #:key boot-timeout on-boot-failure ssh-options
-                       status-file)
-  "Wait for the VM of the QEMU process to boot, run the shell COMMAND with
-SSH-OPTIONS and return the exit status it writes to STATUS-FILE."
-  (wait-for-boot spawn-ssh qemu boot-timeout on-boot-failure)
-  (run-remote spawn-ssh command ssh-options status-file))
-
 (define (check-devices)
   ;; Without KVM, QEMU would keep running stale translated code for pages
   ;; virtiofsd writes into guest memory.
@@ -440,7 +427,6 @@ it is graphical."
   (check-devices))
 
 (define (exit-on-signals!)
-  "Exit, stopping the VM, on SIGINT, SIGTERM and SIGHUP."
   (for-each (lambda (signal)
               (sigaction signal
                 (lambda (signal)
@@ -451,7 +437,8 @@ it is graphical."
   "Run INVOCATION of the VM CONFIG in TMP and return the command's exit
 status."
   (match-record invocation <invocation> (directory command stateless? cache)
-    (match-record config <vm-config> (name uid gid usb? store-items)
+    (match-record config <vm-config> (name uid gid usb? store-items
+                                      guest-runtime-directory)
       (let* ((data (data-directory (home-directory)))
              (home log key (vm-files data tmp name directory stateless?))
              (host-key (string-append tmp "/ssh_host_ed25519_key"))
@@ -467,7 +454,7 @@ status."
                                (tools-waypipe tools)
                                (tools-guest-waypipe tools) name
                                (socket-file tmp "waypipe")
-                               (string-append (guest-runtime-directory uid)
+                               (string-append guest-runtime-directory
                                               "/waypipe.sock")))
              (servers (append (network-servers tmp config tools)
                               wayland-servers
@@ -481,16 +468,14 @@ status."
              (key-blob (ssh-key-blob (tools-ssh-keygen tools) key))
              (spawn-ssh (vm-ssh-spawner config tools data directory key
                                         known-hosts cid))
-             (status-file (guest-status-file uid)))
+             (status-file (guest-status-file guest-runtime-directory)))
         (define (boot qemu)
-          (boot-and-run spawn-ssh qemu
-                        (remote-command command wrapper status-file)
-                        #:boot-timeout (invocation-boot-timeout invocation)
-                        ;; A stateless VM's log is deleted on exit, so show it.
-                        #:on-boot-failure (boot-failure-handler
-                                           log #:show-log? stateless?)
-                        #:ssh-options (cons "-t" forward-options)
-                        #:status-file status-file))
+          (wait-for-boot spawn-ssh qemu (invocation-boot-timeout invocation)
+                         ;; A stateless VM's log is deleted on exit, so show
+                         ;; it.
+                         (boot-failure-handler log #:show-log? stateless?))
+          (run-remote spawn-ssh (remote-command command wrapper status-file)
+                      (cons "-t" forward-options) status-file))
 
         (define (start-vm)
           (call-with-vm (tools-qemu tools)

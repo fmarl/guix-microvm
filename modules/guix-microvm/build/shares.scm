@@ -49,7 +49,6 @@ HOST-GID in its user namespace."
 (define* (vm-shares #:key directory home store store-items host-key
                     stateless? uid gid mount-store mount-read-only
                     (read-only '()))
-  "Return the shares of STORE-ITEMS, DIRECTORY and HOME."
   (let ((owned (id-map-options uid gid 0 0)))
     (list
      ;; Store items belong to root, who is unmapped in the namespace.
@@ -69,7 +68,6 @@ HOST-GID in its user namespace."
 ;; virtiofsd runs as root of a user namespace in which the host user is root
 ;; and other users are nobody.
 (define* (virtiofs-server share socket #:key unshare virtiofsd cache)
-  "Return a virtiofsd server for SHARE at SOCKET."
   (server unshare
           `("--user" "--map-root-user" "--mount"
             ,@(share-wrapper share)
@@ -87,7 +85,6 @@ HOST-GID in its user namespace."
        shares))
 
 (define (virtiofs-device share socket)
-  "Return QEMU options for the virtio-fs device of SHARE at SOCKET."
   (let ((tag (share-tag share)))
     (list "-chardev" (string-append "socket,id=" tag ",path=" socket)
           "-device" (string-append "vhost-user-fs-device,chardev=" tag

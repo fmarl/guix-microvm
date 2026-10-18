@@ -2,6 +2,7 @@
 ;;; Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
 
 (define-module (guix-microvm base)
+  #:use-module ((ice-9 rdelim) #:select (read-line))
   #:use-module (srfi srfi-1)
   #:use-module (guix gexp)
   #:use-module (guix modules)
@@ -23,6 +24,7 @@
             microvm-guest-configuration-ssh-port
             microvm-guest-configuration-network
             microvm-guest-configuration-name-server
+            microvm-guest-runtime-directory
             microvm-guest-service-type
             %microvm-base-services
             %base-vm))
@@ -81,7 +83,6 @@
   `((gnu build linux-boot) ,@%default-modules))
 
 (define (ssh-vsock-service port)
-  "Return the service forwarding vsock PORT to the SSH daemon."
   (shepherd-service
     (provision '(ssh-vsock))
     (requirement '(ssh-daemon ssh-authorized-key work-overlay))
@@ -94,7 +95,6 @@
     (stop #~(make-kill-destructor))))
 
 (define (ssh-authorized-key-service user)
-  "Return the service that authorizes the launcher's key for USER."
   (shepherd-service
     (provision '(ssh-authorized-key))
     (one-shot? #t)
@@ -271,11 +271,20 @@ stateless VMs.")))
     (create-mount-point? #t)
     (check? #f)))
 
+(define (host-timezone)
+  "Return the timezone of the host from /etc/timezone, or Etc/UTC."
+  (let ((zone (false-if-exception
+               (call-with-input-file "/etc/timezone" read-line))))
+    (if (and (string? zone)
+             (not (string-null? zone)))
+        zone
+        "Etc/UTC")))
+
 (define %base-vm
   (operating-system
     (host-name "vm")
     (locale "en_US.utf8")
-    (timezone "Europe/Berlin")
+    (timezone (host-timezone))
     (kernel linux-microvm)
     (kernel-arguments (list "net.ifnames=0"))
     (initrd-modules '())
