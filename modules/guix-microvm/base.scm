@@ -85,7 +85,7 @@
 (define (ssh-vsock-service port)
   (shepherd-service
     (provision '(ssh-vsock))
-    (requirement '(ssh-daemon ssh-authorized-key work-overlay))
+    (requirement '(ssh-daemon ssh-authorized-key work))
     (start #~(make-forkexec-constructor
               (list #$(file-append socat "/bin/socat")
                     #$(string-append "VSOCK-LISTEN:" (number->string port)
@@ -110,31 +110,24 @@
                    (chmod file #o444))
                  #t)))))
 
-;; The launcher shares /work read-only with a stateless VM.
-(define work-overlay-service
+(define (work-service uid gid)
   (shepherd-service
-    (provision '(work-overlay))
-    (requirement '(file-system-/work))
+    (provision '(work))
+    (requirement '(file-systems))
     (one-shot? #t)
     (modules %kernel-option-modules)
     (start #~(lambda _
-               (when #$(kernel-option "guix-microvm.stateless")
-                 (let ((upper "/run/work-overlay/upper")
-                       (work "/run/work-overlay/work")
-                       (lower (stat "/work")))
-                   (mkdir-p upper)
-                   (mkdir-p work)
-                   ;; The overlay's root gets the owner and mode of UPPER.
-                   (chown upper (stat:uid lower) (stat:gid lower))
-                   (chmod upper (stat:perms lower))
-                   (mount "overlay" "/work" "overlay" 0
-                          (string-append "lowerdir=/work,upperdir="
-                                         upper ",workdir=" work))))
+               (mkdir-p "/work")
+               (if #$(kernel-option "guix-microvm.volatile")
+                   (mount "none" "/work" "tmpfs" 0
+                          #$(format #f "mode=755,size=50%,uid=~a,gid=~a"
+                                    uid gid))
+                   (mount "work" "/work" "virtiofs"))
                #t))))
 
 (define (guest-shepherd-services config)
-  (match-record config <microvm-guest-configuration> (user ssh-port)
-    (list work-overlay-service
+  (match-record config <microvm-guest-configuration> (user ssh-port uid gid)
+    (list (work-service uid gid)
           (ssh-vsock-service ssh-port)
           (ssh-authorized-key-service user))))
 
@@ -231,8 +224,8 @@ fi
                                        config)))))))
     (default-value (microvm-guest-configuration))
     (description "Make the system a guix-microvm guest: accept commands over
-SSH on vsock as the configured user, and overlay /work with a tmpfs in
-stateless VMs.")))
+SSH on vsock as the configured user, and mount the project at /work, or a
+tmpfs in volatile VMs.")))
 
 (define %microvm-base-services
   (cons* (service microvm-guest-service-type)
@@ -301,7 +294,6 @@ stateless VMs.")))
                         (virtiofs-file-system "store" "/gnu/store"
                                               #:read-only? #t
                                               #:needed-for-boot? #t)
-                        (virtiofs-file-system "work" "/work")
                         (virtiofs-file-system "home" "/home")
                         %pseudo-terminal-file-system
                         %shared-memory-file-system))
