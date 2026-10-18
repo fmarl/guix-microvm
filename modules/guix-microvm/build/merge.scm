@@ -26,7 +26,8 @@
             problem-detail
             plan-merge
             plan-problems
-            apply-plan))
+            apply-plan
+            forget-merged))
 
 (define %protected-names
   '(".envrc" ".dir-locals.el" ".dir-locals-2.el" ".vscode" ".idea"))
@@ -63,9 +64,12 @@
 
 (define* (classify-changes layer #:key git (protected-files '()))
   "Return the changes of LAYER as an alist of groups: 'mergeable,
-'protected, 'git, 'ignored and 'unprintable."
-  (let* ((unprintable rest (partition (compose unprintable? change-file)
-                                      (layer-changes layer)))
+'protected, 'git, 'ignored, 'unprintable and 'unreadable."
+  (let* ((unreadable rest (partition (lambda (change)
+                                       (eq? 'unreadable (change-kind change)))
+                                     (layer-changes layer)))
+         (unprintable rest (partition (compose unprintable? change-file)
+                                      rest))
          (git-changes rest (partition (compose git-file? change-file) rest))
          ;; Before ignored files, which often include .envrc.
          (protected rest (partition (compose (cut protected? <> protected-files)
@@ -77,32 +81,13 @@
       (protected . ,protected)
       (git . ,git-changes)
       (ignored . ,ignored)
-      (unprintable . ,unprintable))))
+      (unprintable . ,unprintable)
+      (unreadable . ,unreadable))))
 
-(define-record-type <action>
-  (make-action kind file source perms conflicts reason)
-  action?
-  (kind      action-kind)   ;'install | 'merged | 'chmod | 'delete | 'conflict
-  (file      action-file)
-  (source    action-source) ;the merged file
-  (perms     action-perms)
-  (conflicts action-conflicts) ;of the merged file
-  (reason    action-reason)) ;of a conflict
-
-(define (install-action file)
-  (make-action 'install file #f #f #f #f))
-
-(define (merged-action file source conflicts)
-  (make-action 'merged file source #f conflicts #f))
-
-(define (chmod-action file perms)
-  (make-action 'chmod file #f perms #f #f))
-
-(define (delete-action file)
-  (make-action 'delete file #f #f #f #f))
-
-(define (conflict-action file reason)
-  (make-action 'conflict file #f #f #f reason))
+;; Actions are lists: (install FILE), (merge FILE OUTPUT CONFLICTS),
+;; (chmod FILE PERMS), (delete FILE) and (conflict FILE REASON).
+(define (action-file action)
+  (second action))
 
 (define-record-type <problem>
   (make-problem file reason detail)
@@ -120,6 +105,15 @@
              (bytes (not (memv 0 (bytevector->u8-list bytes))))))
          #:binary #t)))
 
+(define (host-state layer file)
+  "Return how the host has FILE compared with LAYER: 'missing, 'unchanged
+since LAYER started, 'same as in the VM, or 'changed."
+  (let ((host (host-file layer file)))
+    (cond ((not (file-stat host)) 'missing)
+          ((host-unchanged? layer file) 'unchanged)
+          ((same-entry? host (upper-file layer file)) 'same)
+          (else 'changed))))
+
 (define* (plan-merge layer changes #:key git directory (protected-files '()))
   "Return the actions that merge CHANGES of LAYER into its project.  Run
 'git merge-file' for the files changed on both sides, keeping the results
@@ -132,61 +126,52 @@ in DIRECTORY."
   (define (three-way file base)
     (let ((host (host-file layer file))
           (vm (upper-file layer file)))
-      (if (every text-file? (list host base vm))
+      (if (and base (every text-file? (list host base vm)))
           (let ((output (temporary-file directory)))
-            (list (merged-action file output
-                                 (git-merge-file git host base vm output))))
-          (list (conflict-action file 'changed-on-both)))))
+            `((merge ,file ,output ,(git-merge-file git host base vm output))))
+          `((conflict ,file changed-on-both)))))
 
   (define (deletions file)
     (filter-map (lambda (entry)
                   (cond ((git-file? entry) #f)
                         ((and (not (string=? entry file))
                               (protected? entry protected-files))
-                         (conflict-action entry 'protected))
-                        ((not (file-stat (host-file layer entry))) #f)
-                        ((host-unchanged? layer entry) (delete-action entry))
-                        (else (conflict-action entry 'changed-on-host))))
+                         `(conflict ,entry protected))
+                        (else
+                         (match (host-state layer entry)
+                           ('missing #f)
+                           ('unchanged `(delete ,entry))
+                           (_ `(conflict ,entry changed-on-host))))))
                 (base-entries layer file)))
 
   (define (change-actions change)
-    (let* ((file (change-file change))
-           (host (host-file layer file))
-           (vm (upper-file layer file)))
-      (match (change-kind change)
-        ('added
-         (cond ((not (file-stat host)) (list (install-action file)))
-               ((same-entry? host vm) '())
-               (else (three-way file (force empty)))))
-        ('modified
-         (cond ((eq? 'directory (change-type change))
-                (if (host-unchanged? layer file)
-                    (list (chmod-action file (stat:perms (lstat vm))))
-                    '()))
-               ((host-unchanged? layer file) (list (install-action file)))
-               ((same-entry? host vm) '())
-               ((not (file-stat host))
-                (list (conflict-action file 'deleted-on-host)))
-               ((base-contents layer file) => (cut three-way file <>))
-               (else (list (conflict-action file 'changed-on-both)))))
-        ('deleted (deletions file))
-        ('replaced (append (deletions file) (list (install-action file)))))))
+    (let ((file (change-file change))
+          (directory? (eq? 'directory (change-type change))))
+      (match (list (change-kind change) (host-state layer file))
+        (('added 'missing) `((install ,file)))
+        (('added 'same) '())
+        (('added _) (three-way file (force empty)))
+        (('modified 'missing) `((conflict ,file deleted-on-host)))
+        (('modified 'unchanged)
+         (if directory?
+             `((chmod ,file ,(stat:perms (lstat (upper-file layer file)))))
+             `((install ,file))))
+        (('modified 'same) '())
+        (('modified 'changed)
+         (if directory?
+             '()
+             (three-way file (base-contents layer file))))
+        (('deleted _) (deletions file))
+        (('replaced _) (append (deletions file) `((install ,file)))))))
 
   (append-map change-actions changes))
 
 (define (plan-problems plan)
-  "Return the problems of PLAN before it is applied: conflicts and merged
-files with conflict markers."
-  (filter-map (lambda (action)
-                (match (action-kind action)
-                  ('conflict
-                   (make-problem (action-file action) (action-reason action)
-                                 #f))
-                  ('merged
-                   (and (positive? (action-conflicts action))
-                        (make-problem (action-file action) 'conflict-markers
-                                      #f)))
-                  (_ #f)))
+  (filter-map (match-lambda
+                (('conflict file reason) (make-problem file reason #f))
+                (('merge file _ (? positive?))
+                 (make-problem file 'conflict-markers #f))
+                (_ #f))
               plan))
 
 (define-exception-type &merge-refusal &error
@@ -212,7 +197,6 @@ files with conflict markers."
            (_ (refuse 'not-a-directory directory))))))))
 
 (define (replace-file project file write)
-  "Replace FILE in PROJECT at once by the file that WRITE creates."
   (let* ((target (file-in project file))
          (temporary (temporary-file (dirname target))))
     (with-exception-handler
@@ -226,7 +210,7 @@ files with conflict markers."
 
 (define* (install source project file #:optional perms)
   "Install SOURCE as FILE in PROJECT with PERMS, or the permissions of
-SOURCE.  Return the permissions to give a directory once its files are in."
+SOURCE.  A directory stays writable until 'restore-permissions'."
   (check-parents project file)
   (let ((stat (lstat source))
         (target (file-in project file)))
@@ -235,8 +219,7 @@ SOURCE.  Return the permissions to give a directory once its files are in."
        (match (file-type target)
          ('directory (chmod target #o700))
          (#f (mkdir target #o700))
-         (_ (refuse 'file-in-the-way)))
-       (stat:perms stat))
+         (_ (refuse 'file-in-the-way))))
       ((and type (or 'regular 'symlink))
        (when (directory? target)
          (refuse 'directory-in-the-way))
@@ -249,8 +232,7 @@ SOURCE.  Return the permissions to give a directory once its files are in."
                            (begin
                              (copy-file source temporary)
                              (chmod temporary
-                                    (or perms (stat:perms stat)))))))
-       #f)
+                                    (or perms (stat:perms stat))))))))
       (_ (refuse 'special-file)))))
 
 (define (remove-entry project file)
@@ -267,6 +249,22 @@ SOURCE.  Return the permissions to give a directory once its files are in."
                (apply throw args)))))
       (_ (delete-file target)))))
 
+;; Directories get their permissions last, so that read-only ones can still
+;; receive their files.
+(define (restore-permissions layer actions)
+  (for-each (match-lambda
+              ((file . perms)
+               (chmod (file-in (layer-project layer) file) perms)))
+            (reverse
+             (filter-map (match-lambda
+                           (('chmod file perms) (cons file perms))
+                           (('install file)
+                            (let ((stat (lstat (upper-file layer file))))
+                              (and (eq? 'directory (stat:type stat))
+                                   (cons file (stat:perms stat)))))
+                           (_ #f))
+                         actions))))
+
 (define (apply-plan layer plan)
   "Apply PLAN to the project of LAYER and return the problems of the files
 it could not change."
@@ -274,53 +272,47 @@ it could not change."
     (layer-project layer))
 
   (define (apply-action action)
-    "Apply ACTION and return the permissions to give a directory later, as
-a pair, or #f."
-    (let ((file (action-file action)))
-      (match (action-kind action)
-        ('install
-         (and=> (install (upper-file layer file) project file)
-                (cut cons file <>)))
-        ('merged
-         (install (action-source action) project file
-                  (stat:perms (lstat (file-in project file))))
-         #f)
-        ('chmod
-         (check-parents project file)
-         (cons file (action-perms action)))
-        ('delete
-         (remove-entry project file)
-         #f)
-        ('conflict #f))))
+    (match action
+      (('install file) (install (upper-file layer file) project file))
+      (('merge file output _)
+       (install output project file
+                (stat:perms (lstat (file-in project file)))))
+      (('chmod file _) (check-parents project file))
+      (('delete file) (remove-entry project file))
+      (('conflict . _) #t)))
 
-  (define (failure action error)
-    (if (merge-refusal? error)
-        (make-problem (action-file action) (merge-refusal-reason error)
-                      (merge-refusal-detail error))
-        (make-problem (action-file action) 'error
-                      (strerror (system-error-errno
-                                 (cons 'system-error
-                                       (exception-args error)))))))
+  (define (problem action)
+    "Apply ACTION and return its problem, or #f."
+    (guard (error ((merge-refusal? error)
+                   (make-problem (action-file action)
+                                 (merge-refusal-reason error)
+                                 (merge-refusal-detail error)))
+                  ((eq? 'system-error (exception-kind error))
+                   (make-problem (action-file action) 'error
+                                 (strerror (system-error-errno
+                                            (cons 'system-error
+                                                  (exception-args error)))))))
+      (apply-action action)
+      #f))
 
-  ;; Directories get their permissions last, so that read-only ones can
-  ;; still receive their files.
-  (let loop ((plan plan)
-             (permissions '())
-             (problems '()))
-    (match plan
-      (()
-       (for-each (match-lambda
-                   ((file . perms)
-                    (chmod (file-in project file) perms)))
-                 permissions)
-       (reverse problems))
-      ((action rest ...)
-       (match (guard (error ((or (merge-refusal? error)
-                                 (eq? 'system-error (exception-kind error)))
-                             (failure action error)))
-                (apply-action action))
-         ((? problem? problem)
-          (loop rest permissions (cons problem problems)))
-         (#f (loop rest permissions problems))
-         (permission
-          (loop rest (cons permission permissions) problems)))))))
+  (let* ((results (map (lambda (action) (cons action (problem action))) plan))
+         (applied (filter-map (match-lambda
+                                ((action . #f) action)
+                                (_ #f))
+                              results)))
+    (restore-permissions layer applied)
+    (filter-map cdr results)))
+
+(define (forget-merged layer plan failures)
+  "Remove from LAYER what PLAN merged, but for the files of FAILURES, so
+that the next run only offers these."
+  (let ((failed (map problem-file failures)))
+    (for-each (lambda (file)
+                (let ((upper (upper-file layer file)))
+                  (unless (or (any (lambda (other)
+                                     (or (contains-file? file other)
+                                         (contains-file? other file)))
+                                   failed)
+                              (memq (file-type upper) '(#f directory)))
+                    (delete-file upper))))
+              (delete-duplicates (map action-file plan)))))

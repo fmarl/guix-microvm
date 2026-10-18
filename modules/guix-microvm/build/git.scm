@@ -46,11 +46,13 @@ return the number of conflicts."
                      (spawn git (list git "merge-file" "-p"
                                       "-L" "host" "-L" "start" "-L" "vm"
                                       file base other)
-                            #:output port))))))
+                            #:output port #:error (null-port)))))))
     (if (< status 128)
         status
         (fail "git merge-file failed with status ~a" status))))
 
+;; A repository around DIRECTORY, such as one of dotfiles, would apply its
+;; configuration and could ignore everything.
 (define (ceiling-environment directory)
   (cons (string-append "GIT_CEILING_DIRECTORIES=" (dirname directory))
         (environ)))
@@ -75,8 +77,6 @@ DIRECTORY ignore, keeping a temporary file in TEMPORARY-DIRECTORY."
                                            "--stdin" "-z")
                                  #:input port #:output (cdr pipe)
                                  #:error (null-port)
-                                 ;; One around the project, such as of
-                                 ;; dotfiles, could ignore everything.
                                  #:environment
                                  (ceiling-environment directory))))))
             (close-port (cdr pipe))
@@ -86,7 +86,6 @@ DIRECTORY ignore, keeping a temporary file in TEMPORARY-DIRECTORY."
               (delete "" (string-split output #\nul))))))))
 
 (define (git-diff-process git tool old new)
-  "Start comparing the directories OLD and NEW with TOOL, or with GIT."
   (if tool
       (spawn "sh" (list "sh" "-c" (string-append tool " \"$1\" \"$2\"")
                         "sh" old new))
@@ -94,6 +93,4 @@ DIRECTORY ignore, keeping a temporary file in TEMPORARY-DIRECTORY."
         (spawn git (list git "-C" directory "diff" "--no-index"
                          "--no-prefix" "-M"
                          (basename old) (basename new))
-               ;; A repository above, such as one of dotfiles, would apply
-               ;; its configuration and attributes.
                #:environment (ceiling-environment directory)))))

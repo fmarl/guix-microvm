@@ -52,7 +52,7 @@
   make-layer make-change user-xattrs?)
 
 (define-private (guix-microvm build review)
-  read-selection)
+  read-selection merge-changes)
 
 (define-private (guix-microvm microvm)
   passt-port-options passt-network-options microvm-network-options
@@ -220,14 +220,21 @@ sleep."
               (invocation-cpus invocation))))))
 
 (test-equal "check-shareable"
-  '(1 1 #f)
+  '(1 1 #f 1)
   (with-environment `(("HOME" . ,(string-append tmp "/home"))
                       ("XDG_DATA_HOME" . ,(string-append tmp "/xdg/data")))
     (lambda ()
       (mkdir-p (string-append tmp "/home"))
+      (mkdir-p (string-append tmp "/real"))
+      (symlink "real" (string-append tmp "/link"))
       (list (exit-code (cut check-shareable tmp))
             (exit-code (cut check-shareable (string-append tmp "/xdg")))
-            (exit-code (cut check-shareable (string-append tmp "/p")))))))
+            (exit-code (cut check-shareable (string-append tmp "/p")))
+            (with-environment `(("XDG_DATA_HOME"
+                                 . ,(string-append tmp "/link/data")))
+              (lambda ()
+                (exit-code (cut check-shareable
+                                (string-append tmp "/real")))))))))
 
 (test-assert "contains-file?"
   (and (contains-file? "/" "/home/u")
@@ -260,12 +267,11 @@ sleep."
     (delete-tree directory)
     (not (file-exists? directory))))
 
-(test-equal "tree-entries"
-  '("a" "a/b" "c")
+(test-equal "tree-entries, parents first"
+  '("a" "a/b" "a/b/c")
   (let ((directory (string-append tmp "/entries")))
-    (write-file (string-append directory "/a/b") "")
-    (write-file (string-append directory "/c") "")
-    (sort (map car (tree-entries directory)) string<?)))
+    (write-file (string-append directory "/a/b/c") "")
+    (map car (tree-entries directory))))
 
 (define* (test-layer name #:key (start '()) (host start) (vm '())
                      (deleted '()))
@@ -302,7 +308,7 @@ directory."
                (change-executable? change)))
        changes))
 
-(let ((project (string-append tmp "/project"))
+(let ((project (string-append tmp "/snapshot-project"))
       (data (string-append tmp "/data")))
   (write-file (string-append project "/file") "x")
 
@@ -389,10 +395,11 @@ echo y > sub/y"
     (summary (layer-changes layer))))
 
 (test-equal "layer-changes, unreadable directory"
-  1
-  (let ((layer (test-layer "unreadable" #:vm '(("locked" . #f)))))
+  '(("locked" unreadable #f) ("n" added #f))
+  (let ((layer (test-layer "unreadable"
+                           #:vm '(("locked/x" . "") ("n" . "")))))
     (chmod (string-append (layer-upper layer) "/locked") 0)
-    (exit-code (cut layer-changes layer))))
+    (summary (layer-changes layer))))
 
 (test-equal "call-with-diff-trees"
   '(("d" "m" "r/x") ("a" "m" "r") #f)
@@ -427,13 +434,16 @@ echo y > sub/y"
   '((mergeable "src" "src/c" "tracked.o")
     (protected ".envrc")
     (git ".git" ".git/config")
-    (ignored "a.o" "build" "build/x"))
+    (ignored "a.o" "build" "build/x")
+    (unprintable "x\nM .envrc")
+    (unreadable))
   (let ((layer (test-layer "classify"
                            #:host '((".gitignore" . "build/\n*.o\n")
                                     ("tracked.o" . ""))
                            #:vm '(("build/x" . "") ("a.o" . "")
                                   ("tracked.o" . "vm") ("src/c" . "")
-                                  (".envrc" . "") (".git/config" . "")))))
+                                  (".envrc" . "") (".git/config" . "")
+                                  ("x\nM .envrc" . "")))))
     (with-environment '(("GIT_CONFIG_GLOBAL" . "/dev/null")
                         ("GIT_CONFIG_NOSYSTEM" . "1"))
       (lambda ()
@@ -442,6 +452,18 @@ echo y > sub/y"
         (map (match-lambda
                ((group . changes) (cons group (map change-file changes))))
              (classify-changes layer #:git "git"))))))
+
+(test-equal "git-check-ignore, only the project's repository"
+  '("b/x")
+  (let ((project (string-append tmp "/outer/project")))
+    (write-file (string-append tmp "/outer/.gitignore") "*\n")
+    (write-file (string-append project "/.gitignore") "b/\n")
+    (with-environment '(("GIT_CONFIG_GLOBAL" . "/dev/null")
+                        ("GIT_CONFIG_NOSYSTEM" . "1"))
+      (lambda ()
+        (system* "git" "-C" (string-append tmp "/outer") "init" "-q")
+        (system* "git" "-C" project "init" "-q")
+        (git-check-ignore "git" project '("a" "b/x") tmp)))))
 
 (define (read-file file)
   (call-with-input-file file get-string-all))
@@ -485,6 +507,26 @@ echo y > sub/y"
                   (lambda (problem other)
                     (string<? (first problem) (first other))))))))
 
+(test-assert "plan-merge, selected deletion of a protected file"
+  (let ((layer (test-layer "protected-deletion"
+                           #:start '((".envrc" . ""))
+                           #:deleted '(".envrc"))))
+    (apply-plan layer (plan-merge layer (layer-changes layer)
+                                  #:git "git" #:directory tmp))
+    (not (file-exists? (string-append (layer-project layer) "/.envrc")))))
+
+(test-equal "merge-changes, incomplete"
+  '(incomplete "vm\n" #f #t)
+  (let ((layer (test-layer "incomplete"
+                           #:start '(("a" . "a\n") ("src/x" . "x\n"))
+                           #:host '(("a" . "a\n"))
+                           #:vm '(("a" . "vm\n") ("src/new" . "new\n")))))
+    (list (quietly (cut merge-changes layer (layer-changes layer)
+                        #:git "git" #:on-conflict 'markers))
+          (read-file (string-append (layer-project layer) "/a"))
+          (file-exists? (string-append (layer-upper layer) "/a"))
+          (file-exists? (string-append (layer-upper layer) "/src/new")))))
+
 (test-equal "apply-plan, read-only directory"
   '("f" #o555)
   (let* ((layer (test-layer "read-only" #:vm '(("ro/f" . "f"))))
@@ -508,29 +550,42 @@ echo y > sub/y"
           (file-exists? (layer-directory layer))
           (read-file (string-append (layer-project layer) "/b")))))
 
-(let ((layer (test-layer "strict"
-                         #:start '(("f" . "start\n"))
-                         #:host '(("f" . "host\n"))
-                         #:vm '(("f" . "vm\n") ("new" . "new\n")
-                                (".envrc" . "evil\n")))))
-  (define (host file)
-    (string-append (layer-project layer) "/" file))
+(define (strict-test-layer name host)
+  (test-layer name
+              #:start '(("f" . "start\n"))
+              #:host `(("f" . ,host))
+              #:vm '(("f" . "vm\n") ("new" . "new\n")
+                     (".envrc" . "evil\n"))))
 
-  (test-equal "resolve-layer, merge with a conflict"
-    '(conflict #t "host\n" #f)
+(test-equal "resolve-layer, merge with a conflict"
+  '(conflict #t "host\n" #f)
+  (let ((layer (strict-test-layer "conflict" "host\n")))
     (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
           (file-exists? (layer-directory layer))
-          (read-file (host "f"))
-          (file-exists? (host "new"))))
+          (read-file (string-append (layer-project layer) "/f"))
+          (file-exists? (string-append (layer-project layer) "/new")))))
 
-  (test-equal "resolve-layer, merge leaves protected files"
-    '(merged #f "vm\n" #f)
-    (begin
-      (write-file (host "f") "start\n")
-      (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
-            (file-exists? (layer-directory layer))
-            (read-file (host "f"))
-            (file-exists? (host ".envrc"))))))
+(test-equal "resolve-layer, merge leaves protected files"
+  '(merged #f "vm\n" "new\n" #f)
+  (let ((layer (strict-test-layer "protected" "start\n")))
+    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
+          (file-exists? (layer-directory layer))
+          (read-file (string-append (layer-project layer) "/f"))
+          (read-file (string-append (layer-project layer) "/new"))
+          (file-exists? (string-append (layer-project layer) "/.envrc")))))
+
+(test-equal "resolve-layer, keep"
+  '(kept #t "start\n")
+  (let ((layer (strict-test-layer "keep" "start\n")))
+    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'keep))
+          (file-exists? (layer-directory layer))
+          (read-file (string-append (layer-project layer) "/f")))))
+
+(test-equal "resolve-layer, nothing to keep"
+  '(merged #f)
+  (let ((layer (test-layer "empty")))
+    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'keep))
+          (file-exists? (layer-directory layer)))))
 
 (test-equal "vm-files"
   '("/d/vm/%2Fp%20q" "/d/vm/%2Fp%20q.log" "/d/ssh/id_ed25519")
@@ -617,15 +672,6 @@ echo y > sub/y"
      "chardev:serial")
     ("-serial" "stdio"))
   (list (serial-options "/l" #f) (serial-options "/l" "stdio")))
-
-(test-equal "id-map-options"
-  '("--translate-uid" "map:1000:0:1" "--translate-gid" "map:100:0:1")
-  (id-map-options 1000 100 0 0))
-
-(test-equal "virtiofs-device"
-  '("-chardev" "socket,id=work,path=/w.sock"
-    "-device" "vhost-user-fs-device,chardev=work,tag=work")
-  (virtiofs-device (share "work" "/w" '() '()) "/w.sock"))
 
 (test-equal "vm-shares"
   '((("store" "/s" #t ("/mount-store" "/items" "/k" "/s" "--"))
@@ -801,9 +847,8 @@ echo y > sub/y"
 (test-equal "microvm-guest-configuration, invalid fields"
   '(#t #t #t #f)
   (map (lambda (thunk)
-         (guard (error (#t #t))
-           (thunk)
-           #f))
+         (and=> (error-message thunk)
+                (cut string-prefix? "invalid value" <>)))
        (list (lambda () (microvm-guest-configuration (ssh-port 22)))
              (lambda () (microvm-guest-configuration (uid "1000")))
              (lambda ()

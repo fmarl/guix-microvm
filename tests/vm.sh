@@ -266,9 +266,16 @@ merge_conflict() {
     status=$?
     grep -q 'conflict in file' "$out"
     reported=$?
-    (cd conflict && status_is 0 microvm --discard -- true)
+    (cd conflict && status_is 1 microvm --discard -- true) &&
+        grep -q 'previous VM' "$out"
+    refused=$?
+    # Discarded at the prompt, which needs a terminal.
+    (cd conflict &&
+         printf 'x\n' | script -qec "$guix microvm --discard -- true" \
+                                /dev/null) >"$out" 2>&1
     discarded=$?
-    [ $status -eq 1 ] && [ $reported -eq 0 ] && [ $discarded -eq 0 ] &&
+    [ $status -eq 1 ] && [ $reported -eq 0 ] && [ $refused -eq 0 ] &&
+        [ $discarded -eq 0 ] && grep -q 'a previous VM made' "$out" &&
         test "$(cat conflict/file)" = host
 }
 

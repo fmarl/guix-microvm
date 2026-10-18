@@ -2,7 +2,8 @@
 # Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
 
 GUIX := guix time-machine -C $(CURDIR)/channels-lock.scm --
-PACKAGES := -e '(@ (guix-microvm packages virtiofsd) virtiofsd)'
+PACKAGES := -e '(@ (guix-microvm packages virtiofsd) virtiofsd)' \
+    -e '(@ (guix-microvm packages emacs) emacs-guix-microvm)'
 LOCKED := -e '(@ (guix-microvm locked) qemu-locked)' \
     -e '(@ (guix-microvm locked) waypipe-locked)'
 
@@ -14,6 +15,8 @@ check:
 	$(GUIX) build -L $(CURDIR)/modules $(LOCKED)
 	$(GUIX) microvm --help >/dev/null
 	$(GUIX) repl -- tests/unit.scm
+	$(GUIX) shell emacs-minimal diffutils -- emacs -Q --batch -L emacs \
+	    -L tests -l guix-microvm-test -f ert-run-tests-batch-and-exit
 	$(MAKE) lint
 
 lint:

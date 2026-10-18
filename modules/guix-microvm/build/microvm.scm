@@ -156,9 +156,14 @@ environment describe."
            (fail "not sharing ~a, which contains the home directory, as a \
 project; use a subdirectory, or --volatile" directory))
           ;; The snapshot of the project would include the layers.
-          ((contains-file? directory (data-directory))
+          ((contains-file? directory (canonical-data-directory))
            (fail "not sharing ~a, which contains ~a, as a project"
                  directory (data-directory))))))
+
+(define (canonical-data-directory)
+  (let ((data (data-directory)))
+    (mkdir-p data)
+    (canonicalize-path data)))
 
 (define (vm-files data tmp name directory stateless?)
   "Return the home, console log and SSH key of VM NAME for DIRECTORY.  They
@@ -500,10 +505,11 @@ resolve its changes.  Return the result of PROC, or 1 if merging failed."
   (define directory
     (invocation-directory invocation))
 
-  (define* (resolve layer #:key previous?)
+  (define* (resolve layer #:key (policy (invocation-policy invocation))
+                    previous?)
     (resolve-layer layer
                    #:git (tools-git tools)
-                   #:policy (invocation-policy invocation)
+                   #:policy policy
                    #:protected-files (vm-config-protected-files config)
                    #:previous? previous?))
 
@@ -512,14 +518,24 @@ resolve its changes.  Return the result of PROC, or 1 if merging failed."
       (let ((data (data-directory)))
         (call-with-project-lock data directory
           (lambda ()
+            ;; Asked even with --merge or --discard, which are meant for
+            ;; this run.
             (for-each (lambda (layer)
-                        (when (memq (resolve layer #:previous? #t)
-                                    '(kept conflict))
-                          (fail "the changes of a previous VM are left")))
+                        (when (memq (resolve layer
+                                             #:policy
+                                             (if (isatty? (current-input-port))
+                                                 'ask
+                                                 'keep)
+                                             #:previous? #t)
+                                    '(kept conflict incomplete))
+                          (fail "the changes of a previous VM on ~a are left; \
+decide on them in a terminal" directory)))
                       (project-layers data directory))
             (let* ((layer (create-layer data directory #:cp (tools-cp tools)))
                    (status (proc layer)))
-              (if (eq? 'conflict (resolve layer)) 1 status)))))))
+              (if (memq (resolve layer) '(conflict incomplete))
+                  1
+                  status)))))))
 
 (define (run-microvm args config tools)
   "Run the VM CONFIG with TOOLS as the command line ARGS ask: share DIR at
