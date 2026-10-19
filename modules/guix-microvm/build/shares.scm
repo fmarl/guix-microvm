@@ -4,12 +4,11 @@
 (define-module (guix-microvm build shares)
   #:use-module (guix build syscalls)
   #:use-module (guix build utils)
-  #:use-module ((ice-9 ftw) #:select (file-system-fold))
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
-  #:use-module (guix-microvm build error)
+  #:use-module (guix-microvm build layer)
   #:use-module (guix-microvm build process)
   #:export (share
             share-tag
@@ -21,10 +20,7 @@
             share-servers
             share-devices
             virtiofs-device
-            mount-store-items
-            find-protected-entries
-            read-only-files
-            mount-read-only))
+            mount-store-items))
 
 (define-record-type <share>
   (share tag directory options wrapper)
@@ -46,21 +42,23 @@ HOST-GID in its user namespace."
   (call-with-input-file (string-append "/proc/sys/kernel/overflow" kind)
     read))
 
-(define* (vm-shares #:key directory home store store-items host-key
-                    stateless? uid gid mount-store mount-read-only
-                    (read-only '()))
+(define* (vm-shares #:key layer home store store-items host-key uid gid
+                    mount-store mount-overlay)
+  "Return the shares of a VM, with the project through LAYER unless it is
+#f."
   (let ((owned (id-map-options uid gid 0 0)))
-    (list
-     ;; Store items belong to root, who is unmapped in the namespace.
-     (share "store" store
-            (cons "--readonly"
-                  (id-map-options 0 0 (overflow-id "uid") (overflow-id "gid")))
-            (list mount-store store-items host-key store "--"))
-     ;; A stateless VM overlays it with a tmpfs.
-     (share "work" directory
-            (if stateless? (cons "--readonly" owned) owned)
-            (if (null? read-only) '() `(,mount-read-only ,@read-only "--")))
-     (share "home" home owned '()))))
+    ;; Store items belong to root, who is unmapped in the namespace.
+    `(,(share "store" store
+              (cons "--readonly"
+                    (id-map-options 0 0 (overflow-id "uid")
+                                    (overflow-id "gid")))
+              (list mount-store store-items host-key store "--"))
+      ,@(if layer
+            (list (share "work" (layer-merged layer) owned
+                         `(,mount-overlay ,@(layer-overlay-arguments layer)
+                           "--")))
+            '())
+      ,(share "home" home owned '()))))
 
 (define (share-socket directory share)
   (socket-file directory (share-tag share)))
@@ -110,63 +108,3 @@ HOST-KEY there.  Needs a private mount namespace."
                     (call-with-output-file target (const #t)))
                 (mount item target "none" (logior MS_BIND MS_REC))))
             (string-tokenize (call-with-input-file items get-string-all))))
-
-;; Tools on the host run code from them.
-(define %protected-names
-  '(".git" ".envrc" ".dir-locals.el" ".dir-locals-2.el" ".vscode" ".idea"))
-
-;; virtiofsd overrides permissions on the user's files, so it can read
-;; directories that the user cannot.
-(define (find-protected-entries directory)
-  "Return the %PROTECTED-NAMES entries in DIRECTORY and its subdirectories,
-not looking into them.  Fail on a directory of the user that cannot be
-read."
-  (define (protected? file)
-    (member (basename file) %protected-names))
-
-  (define (add-if-protected file stat result)
-    (if (protected? file) (cons file result) result))
-
-  (define (keep file stat result)
-    result)
-
-  (define (unreadable file stat errno result)
-    (if (and stat (= (stat:uid stat) (getuid)))
-        (fail "not sharing ~a, ~a cannot be read" directory file)
-        result))
-
-  (reverse
-   (file-system-fold (lambda (file stat result) ;enter?
-                       (not (protected? file)))
-                     add-if-protected            ;leaf
-                     keep                        ;down
-                     keep                        ;up
-                     add-if-protected            ;skip
-                     unreadable                  ;error
-                     '()
-                     directory
-                     lstat)))
-
-(define (read-only-files files)
-  "Return the existing FILES.  Fail on symbolic links, which the VM could
-redirect."
-  (let ((files (delete-duplicates
-                (filter (lambda (file)
-                          (false-if-exception (lstat file)))
-                        files))))
-    (for-each (lambda (file)
-                (unless (equal? (false-if-exception (canonicalize-path file))
-                                file)
-                  (fail "~a is a symbolic link or lies under one" file)))
-              files)
-    files))
-
-;; A mount point cannot be removed or renamed.
-(define (mount-read-only . files)
-  "Bind-mount FILES read-only on themselves."
-  (for-each (lambda (file)
-              (mount file file "none" (logior MS_BIND MS_REC))
-              (mount file file "none"
-                     (logior MS_BIND MS_REMOUNT MS_RDONLY
-                             MS_NOSUID MS_NODEV MS_NOEXEC)))
-            files))

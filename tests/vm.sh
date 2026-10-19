@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
-#
+
 # Boot VMs and test the launcher.
 # Needs /dev/kvm and /dev/vhost-vsock; the Wayland test, a Wayland session.
 #
@@ -22,17 +22,10 @@ failures=0
 project=$(mktemp -d "${TMPDIR:-/tmp}/guix-microvm-test.XXXXXX")
 out=$project.out
 runtime=${XDG_RUNTIME_DIR:-/tmp}
+data=${XDG_DATA_HOME:-$HOME/.local/share}/guix-microvm
 # The default VM's home for the project, named as by 'uri-encode'.
-state=${XDG_DATA_HOME:-$HOME/.local/share}/guix-microvm/vm/$(
-    printf %s "$project" | sed 's|/|%2F|g')
-trap 'rm -rf "$project" "$out" "$state" "$state.log" \
-            "$state%2Fcustom" "$state%2Fcustom.log" \
-            "$state%2Fusb" "$state%2Fusb.log" \
-            "$state%2Fgit" "$state%2Fgit.log" \
-            "$state%2Fworktree" "$state%2Fworktree.log" \
-            "$state%2Foffline" "$state%2Foffline.log" \
-            "$state%2Fprotected" "$state%2Fprotected.log" \
-            "$state%2Fnew" "$state%2Fnew.log"' EXIT
+state=$data/vm/$(printf %s "$project" | sed 's|/|%2F|g')
+trap 'rm -rf "$project" "$out" "$state"*' EXIT
 cd "$project" || exit 1
 
 check() {
@@ -92,7 +85,6 @@ sigterm_stops_vm() {
     [ $? -ne 0 ] && [ $up -eq 0 ]
 }
 
-# The launcher takes the user and SSH port from the guest's configuration.
 guest_configuration() {
     mkdir custom
     cat > custom/vm.scm <<'EOF'
@@ -112,7 +104,7 @@ guest_configuration() {
 EOF
     (cd custom &&
          status_is 6 with_environment XDG_CONFIG_HOME="$project/config" \
-                   microvm --allow -- \
+                   microvm --allow --discard -- \
                    sh -c 'test "$(id -un):$(id -u):$HOME" = \
                                    dev:1001:/home/dev && exit 6')
 }
@@ -132,7 +124,7 @@ usb_hotplug() {
     echo '(microvm (operating-system %base-vm) (usb? #t))' > usb/vm.scm
     (cd usb &&
          with_environment XDG_CONFIG_HOME="$project/config" \
-                          microvm --allow -- sh -c '
+                          microvm --allow --discard -- sh -c '
            devices() {
              ls /sys/bus/usb/devices | grep -cE "^[0-9]+-[0-9.]+$"
            }
@@ -168,77 +160,169 @@ EOF
     [ $? -eq 9 ] && grep -q '^attached' "$out"
 }
 
-# The VM can read .git directories, nested ones too, and .git files, such
-# as those of submodules, but not change them or add hooks.
-git_read_only() {
-    mkdir -p git/.git/hooks git/nested/.git git/sub worktree
+protected_files() {
+    mkdir -p git/.git/hooks
     printf '[core]\n\tbare = false\n' > git/.git/config
-    echo 'gitdir: ../.git/modules/sub' > git/sub/.git
-    echo 'gitdir: /nowhere' > worktree/.git
+    echo kept > git/.envrc
     (cd git &&
-         status_is 7 microvm -- sh -c '
-           grep -q bare /work/.git/config && ! touch /work/.git/config &&
-           ! touch /work/.git/hooks/pre-commit &&
-           ! rmdir /work/.git/hooks && ! mv /work/.git /work/moved &&
-           ! touch /work/nested/.git/config &&
-           ! echo x >> /work/sub/.git && ! rm /work/sub/.git && exit 7') &&
-        (cd worktree &&
-             status_is 8 microvm -- sh -c '
-               grep -q nowhere /work/.git && ! echo x >> /work/.git &&
-               ! rm /work/.git && exit 8') &&
+         status_is 7 microvm --merge -- sh -c '
+           echo changed >> /work/.git/config &&
+           touch /work/.git/hooks/pre-commit &&
+           echo changed > /work/.envrc && exit 7') &&
+        ! grep -q changed git/.git/config &&
         test -z "$(ls -A git/.git/hooks)" &&
-        test "$(cat worktree/.git)" = 'gitdir: /nowhere'
+        test "$(cat git/.envrc)" = kept
 }
 
-# The VM cannot change the files in 'read-only-files'.
-read_only_files() {
-    mkdir -p protected/conf
-    echo kept > protected/.envrc
-    echo '(microvm (operating-system %base-vm)
-                    (read-only-files (list ".envrc" "conf" "missing")))' \
-         > protected/vm.scm
-    (cd protected &&
-         status_is 11 with_environment XDG_CONFIG_HOME="$project/config" \
-                   microvm --allow -- sh -c '
-           grep -q kept /work/.envrc && ! echo x >> /work/.envrc &&
-           ! rm /work/.envrc && ! mv /work/conf /work/moved &&
-           ! touch /work/conf/new && touch /work/missing && exit 11') &&
-        test "$(cat protected/.envrc)" = kept &&
-        test -z "$(ls -A protected/conf)"
-}
-
-new_protected_entries() {
-    mkdir new
-    (cd new &&
-         status_is 0 microvm -- sh -c 'mkdir -p sub/.git && touch .envrc') &&
-        grep -q "warning: the VM created $project/new/sub/.git" "$out" &&
-        grep -q "warning: the VM created $project/new/.envrc" "$out"
-}
-
-# The guest boots without network, its eth0 unconnected.
 offline() {
     mkdir offline
     echo '(microvm (operating-system %base-vm) (network? #f))' \
          > offline/vm.scm
     (cd offline &&
          status_is 10 with_environment XDG_CONFIG_HOME="$project/config" \
-                   microvm --allow -- sh -c 'exit 10')
+                   microvm --allow --discard -- sh -c 'exit 10')
+}
+
+# Start microvm with ARGS in DIRECTORY, in the background, and wait until
+# its command prints "up".
+start_vm() {
+    directory=$1
+    shift
+    (cd "$directory" && microvm "$@") </dev/null >"$out" 2>&1 &
+    pid=$!
+    wait_for_output up
+}
+
+stop_vm() {
+    (cd "$1" && microvm stop vm)
+    wait $pid
+}
+
+second_vm() {
+    mkdir -p locked/sub
+    start_vm locked --discard -- sh -c 'echo up; exec sleep 300'
+    up=$?
+    (cd locked/sub && status_is 1 microvm --discard -- true)
+    refused=$?
+    grep -q 'a VM runs on' "$out"
+    reported=$?
+    stop_vm locked
+    [ $up -eq 0 ] && [ $refused -eq 0 ] && [ $reported -eq 0 ]
+}
+
+diff_shows_changes() {
+    mkdir diffed
+    echo old > diffed/file
+    echo gone > diffed/gone
+    start_vm diffed --discard -- sh -c '
+      echo new > /work/file && rm /work/gone && echo added > /work/added &&
+      echo up && exec sleep 300'
+    up=$?
+    (cd diffed && microvm diff) >diff.out 2>&1
+    stop_vm diffed
+    [ $up -eq 0 ] && grep -q '^+new' diff.out && grep -q '^-gone' diff.out &&
+        grep -q '^+added' diff.out
+}
+
+can_snapshot() {
+    mkdir -p "$data" &&
+        probe=$(mktemp "$data/probe.XXXXXX") &&
+        echo probe > snapshot-probe &&
+        cp --reflink=always snapshot-probe "$probe" 2>/dev/null
+    status=$?
+    rm -f snapshot-probe "${probe:-}"
+    return $status
+}
+
+snapshot() {
+    mkdir snapshot
+    echo old > snapshot/file
+    start_vm snapshot --discard -- sh -c 'echo up; sleep 5; cat /work/file' &&
+        echo new > snapshot/file &&
+        wait $pid &&
+        grep -q '^old' "$out"
+}
+
+merges() {
+    mkdir merging
+    echo old > merging/file
+    echo gone > merging/gone
+    (cd merging &&
+         status_is 0 microvm --merge -- sh -c '
+           echo new > /work/file && rm /work/gone &&
+           echo added > /work/added') &&
+        test "$(cat merging/file)" = new &&
+        test ! -e merging/gone &&
+        test "$(cat merging/added)" = added
+}
+
+merge_conflict() {
+    mkdir conflict
+    echo start > conflict/file
+    start_vm conflict --merge -- sh -c 'echo vm > /work/file && echo up &&
+                                        sleep 5' &&
+        echo host > conflict/file
+    wait $pid
+    status=$?
+    grep -q 'conflict in file' "$out"
+    reported=$?
+    (cd conflict && status_is 0 microvm --discard -- true)
+    discarded=$?
+    [ $status -eq 1 ] && [ $reported -eq 0 ] && [ $discarded -eq 0 ] &&
+        test "$(cat conflict/file)" = host
+}
+
+volatile_field() {
+    mkdir volatile
+    echo '(microvm (operating-system %base-vm) (volatile? #t))' \
+         > volatile/vm.scm
+    (cd volatile &&
+         status_is 12 with_environment XDG_CONFIG_HOME="$project/config" \
+                   microvm --allow -- sh -c 'test -z "$(ls -A /work)" &&
+                                             exit 12')
+}
+
+rename_directory() {
+    mkdir -p renamed/dir/sub
+    echo f > renamed/dir/sub/f
+    (cd renamed &&
+         status_is 0 microvm --merge -- sh -c '
+           mv /work/dir /work/moved && test -e /work/moved/sub/f') &&
+        test "$(cat renamed/moved/sub/f)" = f &&
+        test ! -e renamed/dir
+}
+
+no_terminal() {
+    status_is 1 microvm -- true &&
+        grep -q 'without a terminal' "$out"
 }
 
 before=$(temporary_directories)
 
+echo kept > kept
 check "exit status" \
-      status_is 3 microvm -- \
-                sh -c 'echo kept > /work/kept; touch ~/marker; exit 3'
-check "writes to /work are kept" \
-      test "$(cat kept)" = kept
+      status_is 3 microvm --discard -- sh -c '
+        cat /work/kept && echo new > /work/new && rm /work/kept &&
+        touch ~/marker && exit 3'
+check "writes to /work stay out of the project" \
+      test -e kept -a ! -e new
+check "without a terminal, --merge or --discard is needed" no_terminal
+check "--merge merges the changes" merges
+check "--merge keeps conflicting changes" merge_conflict
 
 check "stateless: exit status" \
       status_is 4 microvm --stateless -- sh -c '
-        cat /work/kept && echo new > /work/new && rm /work/kept &&
+        test -z "$(ls -A /work)" && echo new > /work/new &&
         test ! -e ~/marker && exit 4'
-check "stateless: writes to /work are discarded" \
+check "stateless: /work is empty and discarded" \
       test -e kept -a ! -e new
+check "stateless and persistent: a fresh home, merged changes" \
+      status_is 0 microvm --stateless --persistent --merge -- sh -c '
+        test ! -e ~/marker && cat /work/kept && echo sp > /work/sp'
+check "stateless and persistent: the changes are merged" \
+      test "$(cat sp)" = sp
+check "volatile? needs no terminal and has an empty /work" volatile_field
+check "a directory of the snapshot can be renamed" rename_directory
 
 check "boot failure exits" \
       status_is 1 with_environment VM_MEMORY=48 microvm --stateless -- true
@@ -248,10 +332,16 @@ check "boot failure shows the console" \
 check "SIGTERM stops the VM" sigterm_stops_vm
 check "vm.scm: guest configuration" guest_configuration
 check "USB: hotplug" usb_hotplug
-check ".git is read-only" git_read_only
-check "read-only files" read_only_files
-check "new protected entries are reported" new_protected_entries
+check "protected files change only in the layer" protected_files
 check "no network" offline
+check "one VM per project" second_vm
+check "diff shows the changes" diff_shows_changes
+
+if can_snapshot; then
+    check "the VM sees a snapshot" snapshot
+else
+    echo "SKIP: the VM sees a snapshot (no copy-on-write file system)"
+fi
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
     check "Wayland: exit status" wayland_socket
@@ -261,6 +351,8 @@ fi
 
 check "temporary directories are deleted" \
       wait_for_temporary_directories "$before"
+check "layers are deleted" \
+      test -z "$(ls -A "$data/layers" 2>/dev/null)"
 
 echo "$failures failed"
 [ $failures -eq 0 ]

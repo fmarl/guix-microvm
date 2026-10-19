@@ -22,8 +22,17 @@
   #:use-module (guix-microvm base)
   #:use-module (guix-microvm microvm)
   #:use-module (guix-microvm control)
+  #:use-module ((guix-microvm build error) #:select (%program-name))
+  #:use-module ((guix-microvm build files) #:select (contains-file?))
+  #:use-module ((guix-microvm build git) #:select (git-diff-process))
+  #:use-module ((guix-microvm build layer)
+                #:select (change-file call-with-diff-trees))
+  #:use-module ((guix-microvm build merge) #:select (classify-changes))
   #:use-module ((guix-microvm build microvm)
-                #:select (check-shareable))
+                #:select (check-shareable volatile-vm?))
+  #:use-module ((guix-microvm build review) #:select (report-skipped))
+  #:use-module ((guix-microvm build state)
+                #:select (data-directory project-layers))
   #:use-module ((guix-microvm build process) #:select (wait-for-exit))
   #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
   #:use-module (ice-9 eval-string)
@@ -45,11 +54,15 @@
    or: guix microvm list
    or: guix microvm stop NAME
    or: guix microvm usb attach|detach NAME VENDOR[:PRODUCT]
+   or: guix microvm diff [--tool=COMMAND] [FILE...]
 Run COMMAND, or a login shell, in a microvm sharing the project directory at
 /work.  The microvm is the one vm.scm defines, or the base VM, with the
 packages of manifest.scm.
 
 Or list the running microvms, or stop the running microvm NAME.
+
+Or show the changes the microvm on the project made to FILE, or to all
+files, with 'git diff' or with COMMAND, which gets the old and new directory.
 
 Or give the running microvm NAME the host's USB device with the hexadecimal
 IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
@@ -61,11 +74,20 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
                          forward PORT on the host's loopback to GUEST-PORT,
                          by default PORT, in the microvm"))
   (display (G_ "
-      --share-home       share the project directory even if it is the home
-                         directory or one of its parents"))
+      --stateless        give the microvm a fresh home, and no project
+                         directory unless with --persistent"))
   (display (G_ "
-      --stateless        keep nothing: give the microvm a fresh home and
-                         discard its changes to the project directory"))
+      --merge            merge the microvm's changes to the project directory
+                         without asking, unless they conflict"))
+  (display (G_ "
+      --discard          discard the microvm's changes to the project
+                         directory without asking"))
+  (display (G_ "
+      --persistent       share the project directory at /work, the
+                         default"))
+  (display (G_ "
+      --volatile         give the microvm an empty /work instead of the
+                         project directory"))
   (display (G_ "
       --allow            allow the current vm.scm and manifest.scm to run"))
   (display (G_ "
@@ -76,6 +98,15 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
   (display (G_ "
   -h, --help             display this help and exit"))
   (newline))
+
+(define (exclusive-option name key other-name other-key)
+  "Return the option NAME, which sets KEY and excludes OTHER-NAME, which
+sets OTHER-KEY."
+  (option (list name) #f #f
+          (lambda (opt option-name arg result)
+            (when (assoc-ref result other-key)
+              (leave (G_ "--~a or --~a, not both~%") other-name name))
+            (alist-cons key #t result))))
 
 (define %options
   (cons* (option '(#\h "help") #f #f
@@ -88,12 +119,13 @@ IDs VENDOR and PRODUCT, which the host lacks until it is detached again.\n"))
          (option '(#\p "port") #t #f
                  (lambda (opt name arg result)
                    (alist-cons 'port (string->forwarded-port arg) result)))
-         (option '("share-home") #f #f
-                 (lambda (opt name arg result)
-                   (alist-cons 'share-home? #t result)))
          (option '("stateless") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'stateless? #t result)))
+         (exclusive-option "volatile" 'volatile? "persistent" 'persistent?)
+         (exclusive-option "persistent" 'persistent? "volatile" 'volatile?)
+         (exclusive-option "merge" 'merge? "discard" 'discard?)
+         (exclusive-option "discard" 'discard? "merge" 'merge?)
          (option '("allow") #f #f
                  (lambda (opt name arg result)
                    (alist-cons 'allow? #t result)))
@@ -337,8 +369,11 @@ unless VALID? says it is a KIND."
 (define (launcher-flags opts)
   (filter-map (match-lambda
                 ((key . flag) (and (assoc-ref opts key) flag)))
-              '((share-home? . "--share-home")
-                (stateless? . "--stateless"))))
+              '((stateless? . "--stateless")
+                (volatile? . "--volatile")
+                (persistent? . "--persistent")
+                (merge? . "--merge")
+                (discard? . "--discard"))))
 
 (define (call-with-launcher opts vm proc)
   "Build VM's launcher with the build options in OPTS and call PROC with its
@@ -378,12 +413,18 @@ status."
       (allow-project! project contents))
     (when (or vm-file manifest-file)
       (ensure-allowed project contents))
-    ;; Fail before building the launcher, which checks it too.
-    (check-shareable directory (assoc-ref opts 'share-home?))
-    (call-with-launcher opts (options->microvm opts vm-file manifest-file)
-      (lambda (launcher)
-        (exit (run-launcher launcher directory command
-                            (launcher-flags opts)))))))
+    (let ((vm (options->microvm opts vm-file manifest-file)))
+      ;; Fail before building the launcher, which checks it too.
+      (unless (volatile-vm? #:stateless? (or (assoc-ref opts 'stateless?)
+                                             (microvm-stateless? vm))
+                            #:volatile? (assoc-ref opts 'volatile?)
+                            #:persistent? (assoc-ref opts 'persistent?)
+                            #:volatile-field? (microvm-volatile? vm))
+        (check-shareable directory))
+      (call-with-launcher opts vm
+        (lambda (launcher)
+          (exit (run-launcher launcher directory command
+                              (launcher-flags opts))))))))
 
 (define (find-running-vm name)
   "Return the running microvm NAME.  If several run, return the one sharing
@@ -421,6 +462,72 @@ VENDOR[:PRODUCT]~%")))))
                       (running-vm-name vm) (running-vm-directory vm)))
             (running-vms)))
 
+(define (normalize-file-name file)
+  (string-append
+   "/"
+   (string-join (reverse
+                 (fold (lambda (part result)
+                         (match part
+                           ((or "" ".") result)
+                           (".." (if (pair? result) (cdr result) result))
+                           (_ (cons part result))))
+                       '()
+                       (string-split file #\/)))
+                "/")))
+
+(define (file-in-project project file)
+  (let ((file (normalize-file-name
+               (if (absolute-file-name? file)
+                   file
+                   (string-append (canonicalize-path (getcwd)) "/" file)))))
+    (cond ((string=? file project) "")
+          ((string-prefix? (string-append project "/") file)
+           (string-drop file (+ 1 (string-length project))))
+          (else (leave (G_ "~a: not in the project ~a~%") file project)))))
+
+(define (selected-changes changes files)
+  (if (null? files)
+      changes
+      (filter (lambda (change)
+                (any (lambda (selected)
+                       (or (string-null? selected)
+                           (contains-file? selected (change-file change))))
+                     files))
+              changes)))
+
+(define (show-diff args)
+  "Show the changes of the microvm on the project to the files in ARGS, with
+'git diff' or the tool ARGS name."
+  (let* ((tool files (match args
+                       (((? (cut string-prefix? "--tool=" <>) option)
+                         files ...)
+                        (values (string-drop option
+                                             (string-length "--tool="))
+                                files))
+                       (_ (values #f args))))
+         (project (canonicalize-path (or (project-directory) (getcwd))))
+         (layer (match (project-layers (data-directory) project)
+                  (() (leave (G_ "no microvm runs on ~a~%") project))
+                  ((layer) layer)
+                  (_ (leave (G_ "several microvms left changes to ~a~%")
+                            project))))
+         (groups (classify-changes layer #:git "git"))
+         (changes (selected-changes
+                   (append (assq-ref groups 'mergeable)
+                           (assq-ref groups 'protected))
+                   (map (cut file-in-project project <>) files))))
+    (parameterize ((%program-name "guix microvm"))
+      (report-skipped groups))
+    (if (null? changes)
+        (display (G_ "no changes\n"))
+        (call-with-diff-trees layer changes
+          (lambda (old new)
+            (let ((status (wait-for-exit
+                           (git-diff-process "git" tool old new))))
+              (unless (<= status (if tool 0 1))
+                (leave (G_ "~a exited with status ~a~%")
+                       (or tool "git diff") status))))))))
+
 (define-command (guix-microvm . args)
   (category development)
   (synopsis "run commands in a microvm with a project's packages")
@@ -430,4 +537,5 @@ VENDOR[:PRODUCT]~%")))))
       (("list") (list-vms))
       (("stop" name) (stop-vm! (find-running-vm name)))
       (("usb" rest ...) (control-usb rest))
+      (("diff" rest ...) (show-diff rest))
       (_ (run-in-microvm args)))))

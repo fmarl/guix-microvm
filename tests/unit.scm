@@ -1,20 +1,25 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;; Copyright © 2026 Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
 
-;; Unit tests of the launcher and the extension, without a VM.
-
 (use-modules (guix-microvm build error)
+             (guix-microvm build files)
+             (guix-microvm build git)
+             (guix-microvm build layer)
+             (guix-microvm build merge)
              (guix-microvm build microvm)
              (guix-microvm build process)
              (guix-microvm build shares)
+             (guix-microvm build review)
              (guix-microvm build ssh)
+             (guix-microvm build state)
              (guix-microvm base)
              (guix-microvm control)
              (guix-microvm microvm)
              (gnu services)
              ((gnu services base) #:select (static-networking))
              ((gnu system) #:select (operating-system))
-             ((guix build utils) #:select (mkdir-p delete-file-recursively))
+             ((guix build utils)
+              #:select (mkdir-p delete-file-recursively find-files))
              ((guix diagnostics)
               #:select (guix-warning-port formatted-message?
                         formatted-message-string
@@ -38,10 +43,16 @@
 (define-private (guix-microvm build microvm)
   parse-arguments existing-directory getenv-positive-integer parse-invocation
   invocation-directory invocation-command invocation-stateless?
-  invocation-share-home? invocation-memory invocation-cpus vm-files
-  git-config git-identity read-secrets environment-with serial-options
+  invocation-volatile? invocation-memory invocation-cpus vm-files
+  read-secrets environment-with serial-options
   qemu-arguments vm-kernel-arguments open-log call-with-temporary-directory
-  printable contains-home? warn-about-new-protected-entries)
+  printable)
+
+(define-private (guix-microvm build layer)
+  make-layer make-change user-xattrs?)
+
+(define-private (guix-microvm build review)
+  read-selection)
 
 (define-private (guix-microvm microvm)
   passt-port-options passt-network-options microvm-network-options
@@ -55,7 +66,7 @@
   string->forwarded-port launcher-flags project-directory read-project
   project-digest line->allowed-project allowed-projects allow-project!
   project-allowed? project-file project-files eval-file load-object
-  vm-module-directories)
+  vm-module-directories normalize-file-name file-in-project selected-changes)
 
 (define-syntax-rule (values->list exp)
   (call-with-values (lambda () exp) list))
@@ -145,10 +156,10 @@ sleep."
   (values->list (parse-arguments '())))
 
 (test-equal "parse-arguments, flags, directory and command"
-  '(("--stateless" "--share-home") "/p" ("make" "--" "x"))
+  '(("--stateless" "--persistent") "/p" ("make" "--" "x"))
   (values->list
    (parse-arguments
-    '("--stateless" "--share-home" "/p" "--" "make" "--" "x"))))
+    '("--stateless" "--persistent" "/p" "--" "make" "--" "x"))))
 
 (test-equal "parse-arguments, command only"
   '(() "." ("ls"))
@@ -174,44 +185,352 @@ sleep."
                  (getenv-positive-integer "VM_TEST" 7)))))
        '(#f "3" "1.5" "0" "x")))
 
+(define* (test-config #:key stateless? volatile?)
+  (vm-config
+    (name "vm") (command '("sh")) (stateless? stateless?)
+    (volatile? volatile?) (kernel "/k") (initrd "/i") (kernel-arguments '())
+    (store-items "/s") (profile #f) (memory-size 4096)
+    (cpu-count 4) (network-options #f) (secrets '())
+    (protected-files '())
+    (usb? #f) (user "u") (uid 1000) (gid 1000)
+    (guest-runtime-directory "/run/user/1000") (ssh-port 2222)))
+
+(test-equal "volatile-vm?"
+  '(#f #t #f #t #t 1)
+  (list (volatile-vm?)
+        (volatile-vm? #:stateless? #t)
+        (volatile-vm? #:stateless? #t #:persistent? #t)
+        (volatile-vm? #:volatile? #t)
+        (volatile-vm? #:volatile-field? #t)
+        (exit-code (cut volatile-vm? #:volatile? #t #:persistent? #t))))
+
 (test-equal "parse-invocation"
   `(,(canonicalize-path tmp) ("make") #t #t 512 4)
   (with-environment '(("VM_MEMORY" . "512") ("VM_CPUS" . #f))
     (lambda ()
       (let ((invocation
              (parse-invocation
-              `("--share-home" ,tmp "--" "make")
-              (vm-config
-                (name "vm") (command '("sh")) (stateless? #t)
-                (kernel "/k") (initrd "/i") (kernel-arguments '())
-                (store-items "/s") (profile #f) (memory-size 4096)
-                (cpu-count 4) (network-options #f) (secrets '())
-                (read-only-files '())
-                (usb? #f) (user "u") (uid 1000) (gid 1000)
-                (guest-runtime-directory "/run/user/1000") (ssh-port 2222)))))
+              `(,tmp "--" "make")
+              (test-config #:stateless? #t))))
         (list (invocation-directory invocation)
               (invocation-command invocation)
               (invocation-stateless? invocation)
-              (invocation-share-home? invocation)
+              (invocation-volatile? invocation)
               (invocation-memory invocation)
               (invocation-cpus invocation))))))
 
 (test-equal "check-shareable"
-  '(1 #f #f)
-  (with-environment `(("HOME" . ,(string-append tmp "/home")))
+  '(1 1 #f)
+  (with-environment `(("HOME" . ,(string-append tmp "/home"))
+                      ("XDG_DATA_HOME" . ,(string-append tmp "/xdg/data")))
     (lambda ()
       (mkdir-p (string-append tmp "/home"))
-      (list (exit-code (cut check-shareable tmp #f))
-            (exit-code (cut check-shareable tmp #t))
-            (exit-code (cut check-shareable (string-append tmp "/p") #f))))))
+      (list (exit-code (cut check-shareable tmp))
+            (exit-code (cut check-shareable (string-append tmp "/xdg")))
+            (exit-code (cut check-shareable (string-append tmp "/p")))))))
 
-(test-assert "contains-home?"
-  (and (contains-home? "/" "/home/u")
-       (contains-home? "/home" "/home/u")
-       (contains-home? "/home/u" "/home/u")
-       (not (contains-home? "/home/u/src" "/home/u"))
-       (not (contains-home? "/home/us" "/home/u"))
-       (not (contains-home? "/home/u" "/home/us"))))
+(test-assert "contains-file?"
+  (and (contains-file? "/" "/home/u")
+       (contains-file? "/home" "/home/u")
+       (contains-file? "/home/u" "/home/u")
+       (not (contains-file? "/home/u/src" "/home/u"))
+       (not (contains-file? "/home/us" "/home/u"))
+       (not (contains-file? "/home/u" "/home/us"))))
+
+(test-equal "call-with-project-lock"
+  '(1 1 1 #f ok)
+  (let ((data (string-append tmp "/locks-data")))
+    (call-with-project-lock data "/p"
+      (lambda ()
+        (list (exit-code (cut call-with-project-lock data "/p" (const #t)))
+              (exit-code (cut call-with-project-lock data "/p/q" (const #t)))
+              (exit-code (cut call-with-project-lock data "/" (const #t)))
+              (exit-code (cut call-with-project-lock data "/pq" (const #t)))
+              (call-with-project-lock data "/pq" (const 'ok)))))))
+
+(test-equal "overlay-options"
+  "lowerdir=/a\\,b\\:c\\\\d,upperdir=/u,workdir=/w,userxattr"
+  (overlay-options "/a,b:c\\d" "/u" "/w"))
+
+(test-assert "delete-tree"
+  (let ((directory (string-append tmp "/tree")))
+    (write-file (string-append directory "/locked/sub/file") "")
+    (chmod (string-append directory "/locked/sub") #o500)
+    (chmod (string-append directory "/locked") #o000)
+    (delete-tree directory)
+    (not (file-exists? directory))))
+
+(test-equal "tree-entries"
+  '("a" "a/b" "c")
+  (let ((directory (string-append tmp "/entries")))
+    (write-file (string-append directory "/a/b") "")
+    (write-file (string-append directory "/c") "")
+    (sort (map car (tree-entries directory)) string<?)))
+
+(define* (test-layer name #:key (start '()) (host start) (vm '())
+                     (deleted '()))
+  "Return the layer NAME in TMP over a new project with the files HOST,
+which had the contents START when the layer started.  The VM made the files
+VM and deleted DELETED.  Files are pairs of a name and contents, or #f for a
+directory."
+  (let* ((root (string-append tmp "/" name))
+         (project (string-append root "-project"))
+         (upper (string-append root "/upper")))
+    (define (write-files directory files)
+      (mkdir-p directory)
+      (for-each (match-lambda
+                  ((file . #f) (mkdir-p (string-append directory "/" file)))
+                  ((file . contents)
+                   (write-file (string-append directory "/" file) contents)))
+                files))
+
+    (write-files project host)
+    (write-files (string-append root "/base") start)
+    (write-files upper vm)
+    (for-each (lambda (file)
+                (let ((whiteout (string-append upper "/" file)))
+                  (mkdir-p (dirname whiteout))
+                  (mknod whiteout 'char-special #o600 0)))
+              deleted)
+    (call-with-output-file (string-append root "/project")
+      (cut display project <>))
+    (open-layer root)))
+
+(define (summary changes)
+  (map (lambda (change)
+         (list (change-file change) (change-kind change)
+               (change-executable? change)))
+       changes))
+
+(let ((project (string-append tmp "/project"))
+      (data (string-append tmp "/data")))
+  (write-file (string-append project "/file") "x")
+
+  (unless (user-xattrs? tmp)
+    (test-skip "create-layer"))
+  (test-assert "create-layer"
+    (let ((layer (quietly (cut create-layer data project #:cp "cp"))))
+      (and (file-exists? (layer-upper layer))
+           (file-exists? (string-append (layer-lower layer) "/file"))
+           (equal? project
+                   (layer-project (open-layer (layer-directory layer))))
+           (begin
+             (delete-layer layer)
+             (not (file-exists? (layer-directory layer)))))))
+
+  (unless (user-xattrs? tmp)
+    (test-skip "create-layer, no snapshot"))
+  (test-equal "create-layer, no snapshot"
+    '(#f #t #t #f)
+    (let* ((layer #f)
+           (warning (with-error-to-string
+                     (lambda ()
+                       (set! layer (create-layer data project
+                                                 #:cp "false"))))))
+      (list (layer-snapshot layer)
+            (and (string-contains warning "cannot snapshot") #t)
+            (host-unchanged? layer "file")
+            (begin
+              (write-file (string-append project "/file") "y")
+              (host-unchanged? layer "file")))))
+
+  (when (user-xattrs? tmp)
+    (test-skip "create-layer, no user extended attributes"))
+  (test-equal "create-layer, no user extended attributes"
+    1
+    (exit-code (cut create-layer data project #:cp "cp"))))
+
+(let ((project (string-append tmp "/overlaid")))
+  (for-each (lambda (file)
+              (write-file (string-append project "/" file) file))
+            '("a" "b" "c" "d" "e" "g" "dir/x" "sub/x"))
+
+  (unless (user-xattrs? tmp)
+    (test-skip "layer-changes, overlayfs"))
+  (test-equal "layer-changes, overlayfs"
+    '(("a" modified #f) ("c" modified #t) ("d" deleted #f)
+      ("dir" replaced #f) ("dir/n" added #f) ("f" added #f) ("g" deleted #f)
+      ("g2" added #f) ("link" added #f) ("new" added #f) ("new/f" added #f)
+      ("sub/y" added #f))
+    (let ((layer (quietly (cut create-layer (string-append tmp "/data")
+                               project #:cp "cp"))))
+      (match (layer-overlay-arguments layer)
+        ((lower upper work merged)
+         (and (zero? (system* "unshare" "--user" "--map-root-user" "--mount"
+                              "sh" "-ec" "
+mount -t overlay overlay -o \"$1\" \"$2\"
+cd \"$2\"
+echo more >> a
+touch b
+chmod +x c
+rm d
+printf e > e
+rm -r dir
+mkdir dir
+echo n > dir/n
+echo f > f
+mv g g2
+ln -s a link
+mkdir new
+echo f > new/f
+echo y > sub/y"
+                              "sh" (overlay-options lower upper work)
+                              merged))
+              (summary (layer-changes layer))))))))
+
+(test-equal "layer-changes"
+  '(("a" modified #f) ("d" deleted #f) ("n" added #f) ("tool" added #t))
+  (let ((layer (test-layer "changes"
+                           #:start '(("a" . "a") ("b" . "b") ("d" . "d"))
+                           #:vm '(("a" . "vm") ("b" . "b") ("n" . "n")
+                                  ("tool" . "#!/bin/sh"))
+                           #:deleted '("d"))))
+    (chmod (string-append (layer-upper layer) "/tool") #o755)
+    (summary (layer-changes layer))))
+
+(test-equal "layer-changes, unreadable directory"
+  1
+  (let ((layer (test-layer "unreadable" #:vm '(("locked" . #f)))))
+    (chmod (string-append (layer-upper layer) "/locked") 0)
+    (exit-code (cut layer-changes layer))))
+
+(test-equal "call-with-diff-trees"
+  '(("d" "m" "r/x") ("a" "m" "r") #f)
+  (let ((layer (test-layer "diff"
+                           #:start '(("m" . "m") ("d" . "d") ("r/x" . "x"))
+                           #:vm '(("m" . "vm") ("a" . "a") ("r" . "r"))
+                           #:deleted '("d"))))
+    (define (files directory)
+      (sort (map (cut string-drop <> (+ 1 (string-length directory)))
+                 (find-files directory))
+            string<?))
+
+    (match (call-with-diff-trees layer (layer-changes layer)
+             (lambda (before after)
+               (list (files before) (files after) before)))
+      ((before after directory)
+       (list before after (file-exists? directory))))))
+
+(test-assert "git-file?, git-hook-or-config? and protected?"
+  (and (git-file? ".git/config")
+       (git-file? "sub/.git")
+       (not (git-file? ".gitignore"))
+       (git-hook-or-config? ".git/hooks/pre-commit")
+       (git-hook-or-config? "sub/.git/config")
+       (not (git-hook-or-config? ".git/configx"))
+       (not (git-hook-or-config? ".git/objects/ab/cd"))
+       (protected? "a/.envrc" '())
+       (protected? "conf/x" '("conf"))
+       (not (protected? "configure" '("conf")))))
+
+(test-equal "classify-changes"
+  '((mergeable "src" "src/c" "tracked.o")
+    (protected ".envrc")
+    (git ".git" ".git/config")
+    (ignored "a.o" "build" "build/x"))
+  (let ((layer (test-layer "classify"
+                           #:host '((".gitignore" . "build/\n*.o\n")
+                                    ("tracked.o" . ""))
+                           #:vm '(("build/x" . "") ("a.o" . "")
+                                  ("tracked.o" . "vm") ("src/c" . "")
+                                  (".envrc" . "") (".git/config" . "")))))
+    (with-environment '(("GIT_CONFIG_GLOBAL" . "/dev/null")
+                        ("GIT_CONFIG_NOSYSTEM" . "1"))
+      (lambda ()
+        (system* "git" "-C" (layer-project layer) "init" "-q")
+        (system* "git" "-C" (layer-project layer) "add" "-f" "tracked.o")
+        (map (match-lambda
+               ((group . changes) (cons group (map change-file changes))))
+             (classify-changes layer #:git "git"))))))
+
+(define (read-file file)
+  (call-with-input-file file get-string-all))
+
+(define (merge-test-layer name)
+  (test-layer name
+              #:start '(("a" . "a\n") ("b" . "b1\nb2\nb3\n") ("d/x" . "x\n")
+                        ("d/.git/HEAD" . "") ("d/.envrc" . "")
+                        ("e" . "e\n") ("gone" . ""))
+              #:host '(("a" . "a\n") ("b" . "B1\nb2\nb3\n") ("d/x" . "x\n")
+                       ("d/.git/HEAD" . "") ("d/.envrc" . "")
+                       ("e" . "host\n"))
+              #:vm '(("a" . "vm\n") ("b" . "b1\nb2\nB3\n") ("e" . "vm\n")
+                     ("n" . "n\n") ("link/f" . "f\n"))
+              #:deleted '("d" "gone")))
+
+(test-equal "plan-merge and apply-plan"
+  '(("vm\n" "B1\nb2\nB3\n" #f #t #t #t "n\n")
+    (("d" not-empty) ("d/.envrc" protected) ("e" conflict-markers)
+     ("link" changed-on-both) ("link/f" not-a-directory)))
+  (let* ((layer (merge-test-layer "merge"))
+         (project (layer-project layer))
+         (directory (mkdtemp (string-append tmp "/merge-XXXXXX"))))
+    (symlink "/nowhere" (string-append project "/link"))
+    (let* ((plan (plan-merge layer (layer-changes layer)
+                             #:git "git" #:directory directory))
+           (problems (append (plan-problems plan) (apply-plan layer plan))))
+      (list (list (read-file (string-append project "/a"))
+                  (read-file (string-append project "/b"))
+                  (file-exists? (string-append project "/d/x"))
+                  (file-exists? (string-append project "/d/.git/HEAD"))
+                  (file-exists? (string-append project "/d/.envrc"))
+                  (and (string-contains (read-file (string-append project "/e"))
+                                        "<<<<<<< host")
+                       #t)
+                  (read-file (string-append project "/n")))
+            (sort (map (lambda (problem)
+                         (list (problem-file problem)
+                               (problem-reason problem)))
+                       problems)
+                  (lambda (problem other)
+                    (string<? (first problem) (first other))))))))
+
+(test-equal "apply-plan, read-only directory"
+  '("f" #o555)
+  (let* ((layer (test-layer "read-only" #:vm '(("ro/f" . "f"))))
+         (upper-ro (string-append (layer-upper layer) "/ro")))
+    (chmod upper-ro #o555)
+    (apply-plan layer (plan-merge layer (layer-changes layer)
+                                  #:git "git" #:directory tmp))
+    (list (read-file (string-append (layer-project layer) "/ro/f"))
+          (stat:perms (stat (string-append (layer-project layer) "/ro"))))))
+
+(test-equal "read-selection"
+  '("a" "dir/c d")
+  (let ((file (string-append tmp "/selection")))
+    (write-file file "# Comment\nM a\n# A b\n\nA+x dir/c d\n")
+    (read-selection file)))
+
+(test-equal "resolve-layer, discard"
+  '(discarded #f "B1\nb2\nb3\n")
+  (let ((layer (merge-test-layer "discard")))
+    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'discard))
+          (file-exists? (layer-directory layer))
+          (read-file (string-append (layer-project layer) "/b")))))
+
+(let ((layer (test-layer "strict"
+                         #:start '(("f" . "start\n"))
+                         #:host '(("f" . "host\n"))
+                         #:vm '(("f" . "vm\n") ("new" . "new\n")
+                                (".envrc" . "evil\n")))))
+  (define (host file)
+    (string-append (layer-project layer) "/" file))
+
+  (test-equal "resolve-layer, merge with a conflict"
+    '(conflict #t "host\n" #f)
+    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
+          (file-exists? (layer-directory layer))
+          (read-file (host "f"))
+          (file-exists? (host "new"))))
+
+  (test-equal "resolve-layer, merge leaves protected files"
+    '(merged #f "vm\n" #f)
+    (begin
+      (write-file (host "f") "start\n")
+      (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
+            (file-exists? (layer-directory layer))
+            (read-file (host "f"))
+            (file-exists? (host ".envrc"))))))
 
 (test-equal "vm-files"
   '("/d/vm/%2Fp%20q" "/d/vm/%2Fp%20q.log" "/d/ssh/id_ed25519")
@@ -308,83 +627,29 @@ sleep."
     "-device" "vhost-user-fs-device,chardev=work,tag=work")
   (virtiofs-device (share "work" "/w" '() '()) "/w.sock"))
 
-(let ((project (string-append tmp "/git")))
-  (define (absolute file)
-    (string-append project "/" file))
-
-  (define (relative files)
-    (sort (map (cut string-drop <> (string-length project)) files) string<?))
-
-  (write-file (absolute ".git/config") "")
-  (write-file (absolute ".git/modules/m/.git") "")
-  (write-file (absolute "m/.git") "gitdir: ../.git/modules/m")
-  (write-file (absolute "a/b/.git/HEAD") "")
-  (write-file (absolute "a/file") "")
-  (write-file (absolute ".envrc") "")
-  (write-file (absolute "a/.vscode/settings.json") "")
-
-  (test-equal "find-protected-entries"
-    '("/.envrc" "/.git" "/a/.vscode" "/a/b/.git" "/m/.git")
-    (relative (find-protected-entries project)))
-
-  (test-equal "find-protected-entries, unreadable directory"
-    1
-    (let ((locked (absolute "locked")))
-      (mkdir locked #o000)
-      (let ((status (exit-code (cut find-protected-entries project))))
-        (rmdir locked)
-        status)))
-
-  (test-equal "warn-about-new-protected-entries"
-    (string-append "run-vm: warning: the VM created " (absolute "n/.envrc")
-                   "\n")
-    (let ((old (find-protected-entries project)))
-      (write-file (absolute "n/.envrc") "")
-      (with-error-to-string
-       (cut warn-about-new-protected-entries project old))))
-
-  (test-equal "read-only-files"
-    '("/.envrc" "/a/file")
-    (relative (read-only-files
-               (map absolute '(".envrc" "a/file" "a/file" ".dir-locals.el")))))
-
-  (test-equal "read-only-files, symbolic links"
-    '(1 1)
-    (begin
-      (symlink "a" (absolute "link"))
-      (symlink "/nowhere" (absolute "dangling"))
-      (map (lambda (file)
-             (exit-code (cut read-only-files (list (absolute file)))))
-           '("link/file" "dangling")))))
-
 (test-equal "vm-shares"
   '((("store" "/s" #t ("/mount-store" "/items" "/k" "/s" "--"))
-     ("work" "/p" #f ("/mount-read-only" "/p/.git" "--"))
+     ("work" "/l/merged" #f ("/mount-overlay" "/l/base" "/l/upper" "/l/work"
+                             "/l/merged" "--"))
      ("home" "/h" #f ()))
-    (#t ("--readonly" "--translate-uid" "map:1000:0:1"
-         "--translate-gid" "map:100:0:1")
-     ()))
-  (let ((shares stateless
+    ("store" "home"))
+  (let ((shares volatile
                 (values
-                 (vm-shares #:directory "/p" #:home "/h" #:stateless? #f
-                            #:uid 1000 #:gid 100 #:store "/s"
+                 (vm-shares #:layer (make-layer "/l" "/p" "/l/base" #f)
+                            #:home "/h" #:uid 1000 #:gid 100 #:store "/s"
                             #:store-items "/items" #:host-key "/k"
                             #:mount-store "/mount-store"
-                            #:mount-read-only "/mount-read-only"
-                            #:read-only '("/p/.git"))
-                 (vm-shares #:directory "/p" #:home "/h" #:stateless? #t
-                            #:uid 1000 #:gid 100 #:store "/s"
-                            #:store-items "/items" #:host-key "/k"
-                            #:mount-store "/mount-store"
-                            #:mount-read-only "/mount-read-only"))))
+                            #:mount-overlay "/mount-overlay")
+                 (vm-shares #:layer #f #:home "/h" #:uid 1000 #:gid 100
+                            #:store "/s" #:store-items "/items"
+                            #:host-key "/k" #:mount-store "/mount-store"
+                            #:mount-overlay "/mount-overlay"))))
     (list (map (lambda (share)
                  (list (share-tag share) (share-directory share)
                        (and (member "--readonly" (share-options share)) #t)
                        (share-wrapper share)))
                shares)
-          (list (equal? (map share-tag shares) (map share-tag stateless))
-                (share-options (second stateless))
-                (share-wrapper (second stateless))))))
+          (map share-tag volatile))))
 
 (test-equal "wayland-forwarding"
   '((() () ())
@@ -410,7 +675,7 @@ sleep."
 (test-equal "vm-kernel-arguments"
   '(("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K" "a")
     ("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K"
-     "guix-microvm.stateless=1" "a"))
+     "guix-microvm.volatile=1" "a"))
   (list (vm-kernel-arguments "K" #f '("a"))
         (vm-kernel-arguments "K" #t '("a"))))
 
@@ -515,7 +780,7 @@ sleep."
     "ports: expected a list of PORT or (HOST . GUEST), got ((80 . \"x\"))"
     "secrets: expected a list of variable names, got \"TOKEN\""
     "memory-size: expected a positive integer, got 0"
-    "read-only-files: expected a list of relative file names, got (\"../x\")"
+    "protected-files: expected a list of relative file names, got (\"../x\")"
     #f)
   (map error-message
        (list (lambda () (microvm (operating-system %base-vm) (ports '(0))))
@@ -527,7 +792,7 @@ sleep."
                (microvm (operating-system %base-vm) (memory-size 0)))
              (lambda ()
                (microvm (operating-system %base-vm)
-                 (read-only-files '("../x"))))
+                 (protected-files '("../x"))))
              (lambda ()
                (microvm (operating-system %base-vm)
                  (ports '(3000 (8080 . 80)))
@@ -738,6 +1003,26 @@ gives the commands received.  Each reply follows an event; the command
                '(#xffff . #f))))
        '(#f #t)))
 
+(test-equal "normalize-file-name"
+  '("/a/c" "/" "/a")
+  (map normalize-file-name '("/a/./b/../c/" "/.." "//a//")))
+
+(test-equal "file-in-project"
+  '("" "x" 1)
+  (list (file-in-project "/p" "/p/")
+        (file-in-project "/p" "/p/src/../x")
+        (exit-code (lambda ()
+                     (quietly (cut file-in-project "/p" "/q"))))))
+
+(test-equal "selected-changes"
+  '(3 ("src/b") 3)
+  (let ((changes (map (lambda (file)
+                         (make-change file 'added 'regular #f))
+                       '("a" "src/b" "srcx"))))
+    (list (length (selected-changes changes '()))
+          (map change-file (selected-changes changes '("src")))
+          (length (selected-changes changes '(""))))))
+
 (test-equal "string->forwarded-port"
   '(3000 (8080 . 80) 1)
   (list (string->forwarded-port "3000")
@@ -752,9 +1037,10 @@ gives the commands received.  Each reply follows an event; the command
   (map line->allowed-project '("abc /p q" "" "abc")))
 
 (test-equal "launcher-flags"
-  '(() ("--share-home" "--stateless"))
+  '(() ("--stateless" "--persistent" "--merge"))
   (list (launcher-flags '((vm . "x")))
-        (launcher-flags '((stateless? . #t) (share-home? . #t)))))
+        (launcher-flags '((merge? . #t) (stateless? . #t)
+                          (persistent? . #t)))))
 
 (let* ((project (string-append tmp "/project"))
        (sub (string-append project "/a/b"))
@@ -845,7 +1131,7 @@ gives the commands received.  Each reply follows an event; the command
           (delete-file vm)
           (not (equal? before (digest))))))))
 
-(delete-file-recursively tmp)
+(delete-tree tmp)
 
 (define failures (test-runner-fail-count (test-runner-current)))
 (format #t "~a passed, ~a failed~%"

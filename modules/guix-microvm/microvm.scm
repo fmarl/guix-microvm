@@ -10,6 +10,7 @@
   #:use-module (guix modules)
   #:use-module (guix profiles)
   #:use-module (guix records)
+  #:use-module ((gnu packages base) #:select (coreutils))
   #:use-module (gnu packages containers)
   #:use-module (gnu packages freedesktop)
   #:use-module (gnu packages gnupg)
@@ -31,10 +32,11 @@
             microvm-command
             microvm-wayland?
             microvm-stateless?
+            microvm-volatile?
             microvm-manifest
             microvm-ports
             microvm-secrets
-            microvm-read-only-files
+            microvm-protected-files
             microvm-usb?
             microvm-network?
             microvm-memory-size
@@ -78,6 +80,8 @@ error naming FIELD and EXPECTED for others."
                     (default #f))
   (stateless?       microvm-stateless?
                     (default #f))
+  (volatile?        microvm-volatile?
+                    (default #f))
   (manifest         microvm-manifest          ;<manifest> | #f
                     (default #f))
   (ports            microvm-ports
@@ -88,9 +92,9 @@ error naming FIELD and EXPECTED for others."
                     (default '())
                     (sanitize (validator 'secrets (list-of string?)
                                          "a list of variable names")))
-  (read-only-files  microvm-read-only-files
+  (protected-files  microvm-protected-files
                     (default '())
-                    (sanitize (validator 'read-only-files
+                    (sanitize (validator 'protected-files
                                          (list-of relative-file-name?)
                                          "a list of relative file names")))
   (usb?             microvm-usb?
@@ -178,16 +182,14 @@ from the host's loopback to the guest."
                           #:select? build-module?)
     exp))
 
-(define (namespace-wrapper name setup)
-  "Return the program NAME that applies SETUP, a symbol naming a procedure of
-(guix-microvm build shares), to its arguments up to \"--\" and then executes
-the command after them."
+(define (namespace-wrapper name module setup)
+  "Return the program NAME that applies SETUP, a procedure of MODULE, to its
+arguments up to \"--\" and then executes the command after them."
   (program-file
    name
    (with-build-modules
     #~(begin
-        (use-modules (guix-microvm build shares)
-                     (ice-9 match)
+        (use-modules (ice-9 match)
                      (srfi srfi-1)
                      (srfi srfi-26)
                      (srfi srfi-71))
@@ -195,14 +197,16 @@ the command after them."
                                      (cdr (command-line)))))
           (match rest
             (("--" program args ...)
-             (apply #$setup arguments)
+             (apply (@ #$module #$setup) arguments)
              (apply execl program program args))))))))
 
 (define mount-store
-  (namespace-wrapper "mount-store" 'mount-store-items))
+  (namespace-wrapper "mount-store" '(guix-microvm build shares)
+                     'mount-store-items))
 
-(define mount-read-only
-  (namespace-wrapper "mount-read-only" 'mount-read-only))
+(define mount-overlay
+  (namespace-wrapper "mount-overlay" '(guix-microvm build layer)
+                     'mount-overlay))
 
 (define (microvm-profile vm)
   (and=> (microvm-manifest vm)
@@ -252,6 +256,7 @@ shares DIR at /work and runs COMMAND there."
               (name #$name)
               (command '#$(microvm-command vm))
               (stateless? #$(microvm-stateless? vm))
+              (volatile? #$(microvm-volatile? vm))
               (kernel #$(operating-system-kernel-file os))
               (initrd #$(file-append os "/initrd"))
               (kernel-arguments
@@ -263,7 +268,7 @@ shares DIR at /work and runs COMMAND there."
               (cpu-count #$(microvm-cpu-count vm))
               (network-options '#$(microvm-network-options vm guest))
               (secrets '#$(microvm-secrets vm))
-              (read-only-files '#$(microvm-read-only-files vm))
+              (protected-files '#$(microvm-protected-files vm))
               (usb? #$(microvm-usb? vm))
               (user #$(microvm-guest-configuration-user guest))
               (uid #$(microvm-guest-configuration-uid guest))
@@ -284,8 +289,9 @@ shares DIR at /work and runs COMMAND there."
               (socat #$(file-append socat "/bin/socat"))
               (git #$(file-append git-minimal "/bin/git"))
               (unshare #$(file-append util-linux "/bin/unshare"))
+              (cp #$(file-append coreutils "/bin/cp"))
               (mount-store #$mount-store)
-              (mount-read-only #$mount-read-only)))))))))
+              (mount-overlay #$mount-overlay)))))))))
 
 (define-gexp-compiler (microvm-compiler (vm <microvm>) system target)
   (lower-object (microvm-launcher vm) system #:target target))

@@ -5,19 +5,24 @@
   #:use-module (guix build utils)
   #:use-module (guix records)
   #:use-module (ice-9 match)
-  #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:use-module (srfi srfi-71)
   #:use-module (web uri)
   #:use-module (guix-microvm build error)
+  #:use-module (guix-microvm build files)
+  #:use-module (guix-microvm build git)
+  #:use-module (guix-microvm build layer)
   #:use-module (guix-microvm build process)
+  #:use-module (guix-microvm build review)
   #:use-module (guix-microvm build shares)
   #:use-module (guix-microvm build ssh)
+  #:use-module (guix-microvm build state)
   #:export (vm-config
             tools
             check-shareable
+            volatile-vm?
             runtime-directory
             %vm-directory-prefix
             vm-info-file
@@ -29,6 +34,7 @@
   (name             vm-config-name)
   (command          vm-config-command)
   (stateless?       vm-config-stateless?)
+  (volatile?        vm-config-volatile?)
   (kernel           vm-config-kernel)
   (initrd           vm-config-initrd)
   (kernel-arguments vm-config-kernel-arguments)
@@ -38,7 +44,7 @@
   (cpu-count        vm-config-cpu-count)
   (network-options  vm-config-network-options)  ;passt's | #f
   (secrets          vm-config-secrets)
-  (read-only-files  vm-config-read-only-files)
+  (protected-files  vm-config-protected-files)
   (usb?             vm-config-usb?)
   (user             vm-config-user)
   (uid              vm-config-uid)
@@ -58,15 +64,17 @@
   (socat           tools-socat)
   (git             tools-git)
   (unshare         tools-unshare)
+  (cp              tools-cp)
   (mount-store     tools-mount-store)
-  (mount-read-only tools-mount-read-only))
+  (mount-overlay   tools-mount-overlay))
 
 (define-record-type* <invocation> invocation make-invocation
   invocation?
   (directory    invocation-directory)           ;canonical
   (command      invocation-command)
   (stateless?   invocation-stateless?)
-  (share-home?  invocation-share-home?)
+  (volatile?    invocation-volatile?)
+  (policy       invocation-policy)              ;'ask | 'merge | 'discard
   (memory       invocation-memory)              ;MiB
   (cpus         invocation-cpus)
   (boot-timeout invocation-boot-timeout)        ;seconds
@@ -76,14 +84,17 @@
 (define (parse-arguments args)
   "Split ARGS into flags, directory and command, returned as three values."
   (match args
-    (((and flag (or "--share-home" "--stateless")) rest ...)
+    (((and flag (or "--stateless" "--volatile" "--persistent" "--merge"
+                    "--discard"))
+      rest ...)
      (let ((flags directory command (parse-arguments rest)))
        (values (cons flag flags) directory command)))
     (() (values '() "." '()))
     (("--" command ...) (values '() "." command))
     ((directory) (values '() directory '()))
     ((directory "--" command ...) (values '() directory command))
-    (_ (usage-error "[--share-home] [--stateless] [DIR] [-- COMMAND...]"))))
+    (_ (usage-error "[--stateless] [--volatile|--persistent] \
+[--merge|--discard] [DIR] [-- COMMAND...]"))))
 
 (define (existing-directory directory)
   "Return the canonical name of DIRECTORY, which must exist."
@@ -102,18 +113,35 @@ if it is unset."
            number
            (fail "~a is not a positive integer: ~a" name value))))))
 
+(define* (volatile-vm? #:key stateless? volatile? persistent? volatile-field?)
+  "Return true if a VM gets an empty /work instead of the project."
+  (cond ((and volatile? persistent?)
+         (fail "--volatile or --persistent, not both"))
+        (persistent? #f)
+        (volatile? #t)
+        (else (or stateless? volatile-field?))))
+
 (define (parse-invocation args config)
   "Return the invocation of the VM CONFIG that the command line ARGS and the
 environment describe."
-  (let ((flags requested-directory requested-command (parse-arguments args)))
+  (let* ((flags requested-directory requested-command (parse-arguments args))
+         (flag? (lambda (flag) (and (member flag flags) #t)))
+         (stateless? (or (vm-config-stateless? config) (flag? "--stateless"))))
     (invocation
       (directory (existing-directory requested-directory))
       (command (if (null? requested-command)
                    (vm-config-command config)
                    requested-command))
-      (stateless? (or (vm-config-stateless? config)
-                      (and (member "--stateless" flags) #t)))
-      (share-home? (and (member "--share-home" flags) #t))
+      (stateless? stateless?)
+      (volatile? (volatile-vm? #:stateless? stateless?
+                               #:volatile? (flag? "--volatile")
+                               #:persistent? (flag? "--persistent")
+                               #:volatile-field? (vm-config-volatile? config)))
+      (policy (match (list (flag? "--merge") (flag? "--discard"))
+                ((#f #f) 'ask)
+                ((#t #f) 'merge)
+                ((#f #t) 'discard)
+                (_ (fail "--merge or --discard, not both"))))
       (memory (getenv-positive-integer "VM_MEMORY"
                                        (vm-config-memory-size config)))
       (cpus (getenv-positive-integer "VM_CPUS"
@@ -122,25 +150,15 @@ environment describe."
       (cache (or (getenv "VM_FS_CACHE") "auto"))
       (serial (getenv "VM_SERIAL")))))
 
-(define (home-directory)
-  (canonicalize-path (getenv "HOME")))
-
-(define (contains-home? directory home)
-  "Return true if DIRECTORY is HOME or one of its parents."
-  (or (string=? directory "/")
-      (string=? directory home)
-      (string-prefix? (string-append directory "/") home)))
-
-(define (check-shareable directory share-home?)
-  (when (and (not share-home?)
-             (contains-home? directory (home-directory)))
-    (fail "not sharing ~a, which contains the home directory, without \
---share-home" directory)))
-
-(define (data-directory home)
-  (string-append (or (getenv "XDG_DATA_HOME")
-                     (string-append home "/.local/share"))
-                 "/guix-microvm"))
+(define (check-shareable directory)
+  (let ((home (home-directory)))
+    (cond ((contains-file? directory home)
+           (fail "not sharing ~a, which contains the home directory, as a \
+project; use a subdirectory, or --volatile" directory))
+          ;; The snapshot of the project would include the layers.
+          ((contains-file? directory (data-directory))
+           (fail "not sharing ~a, which contains ~a, as a project"
+                 directory (data-directory))))))
 
 (define (vm-files data tmp name directory stateless?)
   "Return the home, console log and SSH key of VM NAME for DIRECTORY.  They
@@ -195,28 +213,6 @@ exits."
   ;; Only the guest user can write there, so other guest users cannot fake
   ;; it.
   (string-append guest-runtime-directory "/guix-microvm-status"))
-
-(define (git-config git directory name)
-  (let* ((port (with-error-to-port (null-port)
-                 (cut open-pipe* OPEN_READ git "-C" directory "config" name)))
-         (value (string-trim-right (get-string-all port))))
-    (and (eqv? 0 (status:exit-val (close-pipe port)))
-         (not (string-null? value))
-         value)))
-
-(define (git-identity git directory)
-  "Return GIT_AUTHOR_* and GIT_COMMITTER_* as an alist, from the environment
-or else DIRECTORY's Git configuration."
-  (let ((name (or (getenv "GIT_AUTHOR_NAME")
-                  (git-config git directory "user.name")))
-        (email (or (getenv "GIT_AUTHOR_EMAIL")
-                   (git-config git directory "user.email"))))
-    (filter cdr
-            `(("GIT_AUTHOR_NAME" . ,name)
-              ("GIT_AUTHOR_EMAIL" . ,email)
-              ("GIT_COMMITTER_NAME" . ,(or (getenv "GIT_COMMITTER_NAME") name))
-              ("GIT_COMMITTER_EMAIL"
-               . ,(or (getenv "GIT_COMMITTER_EMAIL") email))))))
 
 (define (read-secrets directory names)
   "Return the existing files NAMES in DIRECTORY as an alist of names and
@@ -323,22 +319,22 @@ socket, or #f for an unconnected NIC."
           '("-device" "virtio-net-device"))
     ,@devices))
 
-(define (vm-kernel-arguments key-blob stateless? kernel-arguments)
+(define (vm-kernel-arguments key-blob volatile? kernel-arguments)
   "Return the VM's kernel command line as a list: KERNEL-ARGUMENTS, the SSH
-key KEY-BLOB and whether the VM is STATELESS?."
+key KEY-BLOB and whether the VM is VOLATILE?, without the project."
   ;; With -no-reboot, QEMU exits on a panic.
   `("console=ttyS0" "panic=-1"
     ,(string-append "guix-microvm.ssh-key=" key-blob)
-    ,@(if stateless? '("guix-microvm.stateless=1") '())
+    ,@(if volatile? '("guix-microvm.volatile=1") '())
     ,@kernel-arguments))
 
 (define* (vm-qemu-arguments directory invocation config shares
                             #:key key-blob cid log)
-  (match-record invocation <invocation> (stateless? memory cpus serial)
+  (match-record invocation <invocation> (volatile? memory cpus serial)
     (match-record config <vm-config> (kernel initrd kernel-arguments usb?)
       (qemu-arguments #:kernel kernel #:initrd initrd
                       #:kernel-arguments
-                      (vm-kernel-arguments key-blob stateless?
+                      (vm-kernel-arguments key-blob volatile?
                                            kernel-arguments)
                       #:memory memory #:cpus cpus #:cid cid
                       #:network (network-socket-file directory config)
@@ -420,8 +416,8 @@ writes to STATUS-FILE."
 (define (check-host invocation name waypipe)
   "Fail unless the host can run INVOCATION of the VM NAME, with WAYPIPE if
 it is graphical."
-  (check-shareable (invocation-directory invocation)
-                   (invocation-share-home? invocation))
+  (unless (invocation-volatile? invocation)
+    (check-shareable (invocation-directory invocation)))
   (when (and waypipe (not (getenv "WAYLAND_DISPLAY")))
     (fail "WAYLAND_DISPLAY is not set: ~a needs a Wayland session" name))
   (check-devices))
@@ -433,22 +429,21 @@ it is graphical."
                   (exit (+ 128 signal)))))
             (list SIGINT SIGTERM SIGHUP)))
 
-(define (run-vm tmp invocation config tools read-only)
-  "Run INVOCATION of the VM CONFIG in TMP and return the command's exit
-status."
+(define (run-vm tmp invocation config tools layer)
+  "Run INVOCATION of the VM CONFIG in TMP, sharing the project through LAYER
+unless it is #f, and return the command's exit status."
   (match-record invocation <invocation> (directory command stateless? cache)
     (match-record config <vm-config> (name uid gid usb? store-items
                                       guest-runtime-directory)
-      (let* ((data (data-directory (home-directory)))
+      (let* ((data (data-directory))
              (home log key (vm-files data tmp name directory stateless?))
              (host-key (string-append tmp "/ssh_host_ed25519_key"))
-             (shares (vm-shares #:directory directory #:home home
+             (shares (vm-shares #:layer layer #:home home
                                 #:store (string-append tmp "/store")
                                 #:store-items store-items #:host-key host-key
-                                #:stateless? stateless? #:uid uid #:gid gid
+                                #:uid uid #:gid gid
                                 #:mount-store (tools-mount-store tools)
-                                #:mount-read-only (tools-mount-read-only tools)
-                                #:read-only read-only))
+                                #:mount-overlay (tools-mount-overlay tools)))
              (wayland-servers wrapper forward-options
                               (wayland-forwarding
                                (tools-waypipe tools)
@@ -492,15 +487,39 @@ status."
                                  (usb? . ,usb?))
           (cut call-with-servers servers start-vm))))))
 
-(define (warn-about-new-protected-entries directory old)
-  (for-each (lambda (file)
-              (format (current-error-port)
-                      "~a: warning: the VM created ~a~%" (%program-name) file))
-            (lset-difference string=?
-                             (or (false-if-exception
-                                  (find-protected-entries directory))
-                                 '())
-                             old)))
+(define (check-policy invocation)
+  (when (and (not (invocation-volatile? invocation))
+             (eq? 'ask (invocation-policy invocation))
+             (not (isatty? (current-input-port))))
+    (fail "without a terminal to ask about its changes, pass --merge or \
+--discard")))
+
+(define (call-with-project invocation config tools proc)
+  "Call PROC with the layer over the project, or #f for a volatile VM, then
+resolve its changes.  Return the result of PROC, or 1 if merging failed."
+  (define directory
+    (invocation-directory invocation))
+
+  (define* (resolve layer #:key previous?)
+    (resolve-layer layer
+                   #:git (tools-git tools)
+                   #:policy (invocation-policy invocation)
+                   #:protected-files (vm-config-protected-files config)
+                   #:previous? previous?))
+
+  (if (invocation-volatile? invocation)
+      (proc #f)
+      (let ((data (data-directory)))
+        (call-with-project-lock data directory
+          (lambda ()
+            (for-each (lambda (layer)
+                        (when (memq (resolve layer #:previous? #t)
+                                    '(kept conflict))
+                          (fail "the changes of a previous VM are left")))
+                      (project-layers data directory))
+            (let* ((layer (create-layer data directory #:cp (tools-cp tools)))
+                   (status (proc layer)))
+              (if (eq? 'conflict (resolve layer)) 1 status)))))))
 
 (define (run-microvm args config tools)
   "Run the VM CONFIG with TOOLS as the command line ARGS ask: share DIR at
@@ -511,18 +530,9 @@ status."
      (lambda ()
        (let ((invocation (parse-invocation args config)))
          (check-host invocation (vm-config-name config) (tools-waypipe tools))
-         (let* ((directory (invocation-directory invocation))
-                (protected (find-protected-entries directory))
-                (read-only (read-only-files
-                            (append protected
-                                    (map (cut string-append directory "/" <>)
-                                         (vm-config-read-only-files
-                                          config))))))
-           (exit-on-signals!)
-           (dynamic-wind
-             (const #t)
-             (lambda ()
-               (call-with-temporary-directory (runtime-directory)
-                 (cut run-vm <> invocation config tools read-only)))
-             (lambda ()
-               (warn-about-new-protected-entries directory protected)))))))))
+         (check-policy invocation)
+         (exit-on-signals!)
+         (call-with-project invocation config tools
+           (lambda (layer)
+             (call-with-temporary-directory (runtime-directory)
+               (cut run-vm <> invocation config tools layer)))))))))
