@@ -52,14 +52,17 @@
 (define (show-help)
   (display (G_ "Usage: guix microvm [OPTION]... [-- COMMAND...]
    or: guix microvm list
-   or: guix microvm stop NAME
+   or: guix microvm attach NAME
+   or: guix microvm kill NAME
    or: guix microvm usb attach|detach NAME VENDOR[:PRODUCT]
    or: guix microvm diff [--tool=COMMAND] [FILE...]
 Run COMMAND, or a login shell, in a microvm sharing the project directory at
 /work.  The microvm is the one vm.scm defines, or the base VM, with the
-packages of manifest.scm.
+packages of manifest.scm.  A microvm running a login shell keeps running
+after it exits, until it is killed.
 
-Or list the running microvms, or stop the running microvm NAME.
+Or list the running microvms, open a login shell in the running microvm NAME,
+or kill it.  NAME may also be the ID that 'list' shows.
 
 Or show the changes the microvm on the project made to FILE, or to all
 files, with 'git diff' or with COMMAND, which gets the old and new directory.
@@ -427,9 +430,11 @@ status."
                               (launcher-flags opts))))))))
 
 (define (find-running-vm name)
-  "Return the running microvm NAME.  If several run, return the one sharing
-the current project."
-  (match (filter (compose (cut string=? name <>) running-vm-name)
+  "Return the running microvm named NAME, or with the ID NAME.  If several
+run, return the one sharing the current project."
+  (match (filter (lambda (vm)
+                   (member name (list (running-vm-name vm)
+                                      (running-vm-id vm))))
                  (running-vms))
     (() (leave (G_ "no microvm '~a' is running~%") name))
     ((vm) vm)
@@ -458,8 +463,9 @@ VENDOR[:PRODUCT]~%")))))
 
 (define (list-vms)
   (for-each (lambda (vm)
-              (format #t "~a\t~a~%"
-                      (running-vm-name vm) (running-vm-directory vm)))
+              (format #t "~a\t~a\t~a~%"
+                      (running-vm-name vm) (running-vm-id vm)
+                      (running-vm-directory vm)))
             (running-vms)))
 
 (define (normalize-file-name file)
@@ -544,7 +550,8 @@ VENDOR[:PRODUCT]~%")))))
   (with-error-handling
     (match args
       (("list") (list-vms))
-      (("stop" name) (stop-vm! (find-running-vm name)))
+      (("attach" name) (exit (attach-vm! (find-running-vm name))))
+      (("kill" name) (kill-vm! (find-running-vm name)))
       (("usb" rest ...) (control-usb rest))
       (("diff" rest ...) (show-diff rest))
       (_ (run-in-microvm args)))))

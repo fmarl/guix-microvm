@@ -18,14 +18,16 @@
 (define-public emacs-guix-microvm
   (package
     (name "emacs-guix-microvm")
-    (version "0.2")
+    (version "0.3")
     (source
      (local-file (string-append %emacs-directory "/guix-microvm.el")))
     (build-system emacs-build-system)
     (home-page "https://github.com/fmarl/guix-microvm")
-    (synopsis "Emacs mode for selecting the changes of a microvm")
+    (synopsis "Emacs interface to guix microvm")
     (description
      "This package provides an Emacs mode for the list of changes
 that @command{guix microvm} opens to select the ones to merge.  It shows the
-diff of the file at point and finishes or aborts the selection.")
+diff of the file at point and finishes or aborts the selection.  It also lists
+the running microvms, to open their @file{/work} with TRAMP or to kill
+them.")
     (license license:gpl3+)))

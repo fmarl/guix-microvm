@@ -10,7 +10,9 @@
   #:export (shell-quote
             ssh-key-blob
             write-known-hosts
+            ssh-options
             ssh-spawner
+            spawn-batch-ssh
             ssh-succeeds?
             ssh-output
             remote-command
@@ -38,11 +40,10 @@ missing."
     (lambda (port)
       (format port "~a ssh-ed25519 ~a~%" %host-key-alias host-key-blob))))
 
-(define* (ssh-arguments destination command
-                        #:key key known-hosts socat cid port send-env options)
-  "Return ssh arguments to run COMMAND at DESTINATION over vsock CID:PORT
-with KEY and KNOWN-HOSTS."
-  `("ssh" "-F" "/dev/null" "-q"
+(define* (ssh-options #:key key known-hosts socat cid port send-env)
+  "Return the ssh options that connect over vsock CID:PORT with KEY and
+KNOWN-HOSTS."
+  `("-F" "/dev/null" "-q"
     "-i" ,key "-o" "IdentitiesOnly=yes"
     "-o" "StrictHostKeyChecking=yes"
     "-o" ,(string-append "UserKnownHostsFile=" known-hosts)
@@ -50,33 +51,29 @@ with KEY and KNOWN-HOSTS."
     "-o" ,(string-append "HostKeyAlias=" %host-key-alias)
     "-o" "ForwardAgent=no" "-o" "ForwardX11=no"
     "-o" ,(string-append "SendEnv=" (string-join send-env))
-    "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a" socat cid port)
-    ,@options
-    ,destination
-    ,command))
+    "-o" ,(format #f "ProxyCommand=~a - VSOCK-CONNECT:~a:~a" socat cid port)))
 
-(define* (ssh-spawner ssh destination
-                      #:key key known-hosts socat cid port send-env
-                      environment)
-  "Return a procedure that runs a command at DESTINATION with SSH over vsock
-and returns its PID."
+(define* (ssh-spawner ssh connection-options destination
+                      #:key (environment (environ)))
+  "Return a procedure that runs a command at DESTINATION with SSH and
+CONNECTION-OPTIONS, and returns its PID."
   (lambda* (command #:key (options '())
                     (output (current-output-port))
                     (error (current-error-port)))
-    (spawn ssh (ssh-arguments destination command
-                              #:key key #:known-hosts known-hosts
-                              #:socat socat #:cid cid #:port port
-                              #:send-env send-env #:options options)
+    (spawn ssh `("ssh" ,@connection-options ,@options ,destination ,command)
            #:environment environment #:output output #:error error)))
 
 (define %batch-options
   '("-n" "-o" "BatchMode=yes" "-o" "ConnectTimeout=5"))
 
+(define (spawn-batch-ssh spawn-ssh command)
+  "Start COMMAND with SPAWN-SSH, without input, output or prompts, and
+return its PID."
+  (spawn-ssh command #:options %batch-options
+             #:output (null-port) #:error (null-port)))
+
 (define (ssh-succeeds? spawn-ssh command)
-  (zero? (wait-for-exit (spawn-ssh command
-                                   #:options %batch-options
-                                   #:output (null-port)
-                                   #:error (null-port)))))
+  (zero? (wait-for-exit (spawn-batch-ssh spawn-ssh command))))
 
 (define (ssh-output spawn-ssh command)
   (match (pipe)

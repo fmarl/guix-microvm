@@ -190,15 +190,19 @@ then
 fi
 "))
 
-;; /etc/bashrc sources it after setting its own PS1.
+;; /etc/bashrc sources it after setting its own PS1.  TRAMP, which sets
+;; TERM=dumb, recognizes only that one.
 (define microvm-prompt
   (plain-file "guix-microvm-prompt.sh" "\
-PS1='\\h:\\w $(s=$?; [ $s = 0 ] || printf \"\\001\\033[31m\\002%s \\001\\033[0m\\002\" $s)'
-if [ \"$EUID\" = 0 ]
+if [ \"$TERM\" != dumb ]
 then
-  PS1=\"$PS1\"'\\[\\033[31m\\]#\\[\\033[0m\\] '
-else
-  PS1=\"$PS1\"'μ '
+  PS1='\\h:\\w $(s=$?; [ $s = 0 ] || printf \"\\001\\033[31m\\002%s \\001\\033[0m\\002\" $s)'
+  if [ \"$EUID\" = 0 ]
+  then
+    PS1=\"$PS1\"'\\[\\033[31m\\]#\\[\\033[0m\\] '
+  else
+    PS1=\"$PS1\"'μ '
+  fi
 fi
 "))
 

@@ -26,6 +26,7 @@
             runtime-directory
             %vm-directory-prefix
             vm-info-file
+            vm-ssh-spawner
             qmp-socket-file
             run-microvm))
 
@@ -242,31 +243,41 @@ contents."
                     (assoc (entry-name entry) variables))
                   (environ))))
 
-(define (vm-variables git directory profile secrets-directory secrets)
-  "Return the VM's variables as an alist: the Git identity for DIRECTORY,
-PROFILE if any, and SECRETS from SECRETS-DIRECTORY."
+(define (vm-variables git directory profile)
+  "Return the Git identity for DIRECTORY and PROFILE, if any, as an alist
+of variables."
   (append (git-identity git directory)
           (if profile
               `(("GUIX_MICROVM_PROFILE" . ,profile))
-              '())
-          (read-secrets secrets-directory secrets)))
+              '())))
 
 (define (send-env-patterns secrets)
   `("LANG" "COLORTERM" "GIT_AUTHOR_*" "GIT_COMMITTER_*" "GUIX_MICROVM_PROFILE"
     ,@secrets))
 
-(define (vm-ssh-spawner config tools data directory key known-hosts cid)
-  "Return the procedure that runs commands in the VM CONFIG over SSH."
+(define (vm-ssh config tools data directory key known-hosts cid)
+  "Return how ssh reaches the VM CONFIG, as an alist."
   (match-record config <vm-config> (name user ssh-port profile secrets)
-    (ssh-spawner (tools-ssh tools) (string-append user "@" name)
-                 #:key key #:known-hosts known-hosts
-                 #:socat (tools-socat tools) #:cid cid
-                 #:port ssh-port
-                 #:send-env (send-env-patterns secrets)
-                 #:environment
-                 (environment-with
-                  (vm-variables (tools-git tools) directory profile
-                                (secrets-directory data name) secrets)))))
+    `((program . ,(tools-ssh tools))
+      (options . ,(ssh-options #:key key #:known-hosts known-hosts
+                               #:socat (tools-socat tools) #:cid cid
+                               #:port ssh-port
+                               #:send-env (send-env-patterns secrets)))
+      (destination . ,(string-append user "@" name))
+      (variables . ,(vm-variables (tools-git tools) directory profile))
+      ;; Read when sending them, to keep them out of the VM's info file.
+      (secrets . (,(secrets-directory data name) ,@secrets)))))
+
+(define (vm-ssh-spawner ssh)
+  "Return the procedure that runs commands with SSH, from 'vm-ssh'."
+  (ssh-spawner (assq-ref ssh 'program) (assq-ref ssh 'options)
+               (assq-ref ssh 'destination)
+               #:environment
+               (environment-with
+                (append (assq-ref ssh 'variables)
+                        (match (assq-ref ssh 'secrets)
+                          ((directory . names)
+                           (read-secrets directory names)))))))
 
 ;; vsock CIDs are global on the host.  The PID keeps them unique among
 ;; launchers, and the offset keeps them above the CIDs other hypervisors
@@ -396,9 +407,9 @@ a message if QEMU exits or TIMEOUT seconds pass first."
                (sleep 1)
                (loop)))))))
 
-(define (run-remote spawn-ssh command options status-file)
-  "Run the shell COMMAND with ssh OPTIONS and return the exit status it
-writes to STATUS-FILE."
+(define (run-remote spawn-ssh qemu command options status-file)
+  "Run the shell COMMAND with ssh OPTIONS in the VM of the QEMU process and
+return the exit status it writes to STATUS-FILE."
   (let ((status (wait-for-exit (spawn-ssh command #:options options))))
     ;; Sync before QEMU is stopped.  The exit status comes from a file, as
     ;; ssh's own cannot be told apart from the command's.
@@ -406,9 +417,21 @@ writes to STATUS-FILE."
          (string-trim-both
           (ssh-output spawn-ssh (string-append "sync; cat " status-file))))
         (begin
-          (format (current-error-port) "~a: lost the connection to the VM~%"
-                  (%program-name))
+          (format (current-error-port) "~a: ~a~%" (%program-name)
+                  ;; QEMU takes a moment to exit.
+                  (if (exits-within? qemu 5)
+                      "the VM was killed"
+                      "lost the connection to the VM"))
           status))))
+
+(define (wait-until-killed qemu name)
+  (when (child-alive? qemu)
+    (format (current-error-port) "~a: the VM keeps running; \
+'guix microvm attach ~a' opens a shell and 'guix microvm kill ~a' stops it~%"
+            (%program-name) name name)
+    (let loop ()
+      (unless (exits-within? qemu 60)
+        (loop)))))
 
 (define (check-devices)
   ;; Without KVM, QEMU would keep running stale translated code for pages
@@ -466,16 +489,22 @@ unless it is #f, and return the command's exit status."
              (known-hosts (string-append tmp "/known_hosts"))
              (cid (vm-cid))
              (key-blob (ssh-key-blob (tools-ssh-keygen tools) key))
-             (spawn-ssh (vm-ssh-spawner config tools data directory key
-                                        known-hosts cid))
+             (ssh (vm-ssh config tools data directory key known-hosts cid))
+             (spawn-ssh (vm-ssh-spawner ssh))
              (status-file (guest-status-file guest-runtime-directory)))
         (define (boot qemu)
           (wait-for-boot spawn-ssh qemu (invocation-boot-timeout invocation)
                          ;; A stateless VM's log is deleted on exit, so show
                          ;; it.
                          (boot-failure-handler log #:show-log? stateless?))
-          (run-remote spawn-ssh (remote-command command wrapper status-file)
-                      (cons "-t" forward-options) status-file))
+          (let ((status
+                 (run-remote spawn-ssh qemu
+                             (remote-command command wrapper status-file)
+                             (cons "-t" forward-options) status-file)))
+            ;; Without a terminal, nobody would kill it.
+            (when (and (null? command) (isatty? (current-input-port)))
+              (wait-until-killed qemu name))
+            status))
 
         (define (start-vm)
           (call-with-vm (tools-qemu tools)
@@ -489,7 +518,8 @@ unless it is #f, and return the command's exit status."
         (for-each mkdir-p (map share-directory shares))
         (call-with-vm-info tmp `((name . ,name)
                                  (directory . ,directory)
-                                 (usb? . ,usb?))
+                                 (usb? . ,usb?)
+                                 (ssh . ,ssh))
           (cut call-with-servers servers start-vm))))))
 
 (define (check-policy invocation)

@@ -193,8 +193,8 @@ start_vm() {
     wait_for_output up
 }
 
-stop_vm() {
-    (cd "$1" && microvm stop vm)
+kill_vm() {
+    (cd "$1" && microvm kill vm)
     wait $pid
 }
 
@@ -206,7 +206,7 @@ second_vm() {
     refused=$?
     grep -q 'a VM runs on' "$out"
     reported=$?
-    stop_vm locked
+    kill_vm locked
     [ $up -eq 0 ] && [ $refused -eq 0 ] && [ $reported -eq 0 ]
 }
 
@@ -219,9 +219,31 @@ diff_shows_changes() {
       echo up && exec sleep 300'
     up=$?
     (cd diffed && microvm diff) >diff.out 2>&1
-    stop_vm diffed
+    kill_vm diffed
     [ $up -eq 0 ] && grep -q '^+new' diff.out && grep -q '^-gone' diff.out &&
         grep -q '^+added' diff.out
+}
+
+shell_keeps_running() {
+    mkdir shell
+    (cd shell &&
+         printf 'echo shell > /work/file; exit\n' |
+             script -qfec "$guix microvm --merge" /dev/null) >"$out" 2>&1 &
+    pid=$!
+    i=0
+    until grep -q 'the VM keeps running' "$out" || [ $i -ge 300 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    attached=$(cd shell && echo 'cat file' | microvm attach vm 2>&1)
+    kill_vm shell
+    [ "$attached" = shell ] && [ "$(cat shell/file)" = shell ]
+}
+
+piped_shell_exits() {
+    mkdir piped
+    (cd piped && echo 'exit 5' | microvm --discard) >"$out" 2>&1
+    [ $? -eq 5 ]
 }
 
 can_snapshot() {
@@ -343,6 +365,9 @@ check "protected files change only in the layer" protected_files
 check "no network" offline
 check "one VM per project" second_vm
 check "diff shows the changes" diff_shows_changes
+check "a shell's VM runs until it is killed, and can be attached" \
+      shell_keeps_running
+check "a shell without a terminal ends its VM" piped_shell_exits
 
 if can_snapshot; then
     check "the VM sees a snapshot" snapshot

@@ -5,6 +5,8 @@
   #:use-module (guix diagnostics)
   #:use-module (guix i18n)
   #:use-module (guix-microvm build microvm)
+  #:use-module (guix-microvm build process)
+  #:use-module (guix-microvm build ssh)
   #:use-module (ice-9 format)
   #:use-module (ice-9 ftw)
   #:use-module (ice-9 match)
@@ -16,11 +18,13 @@
   #:use-module (srfi srfi-26)
   #:export (running-vm?
             running-vm-name
+            running-vm-id
             running-vm-directory
             running-vm-usb?
             running-vm-qmp-socket
             running-vms
-            stop-vm!
+            attach-vm!
+            kill-vm!
             call-with-qmp
             string->usb-id
             present-usb-devices
@@ -28,12 +32,14 @@
             detach-usb!))
 
 (define-record-type <running-vm>
-  (running-vm name directory usb? qmp-socket)
+  (running-vm name id directory usb? qmp-socket ssh)
   running-vm?
   (name       running-vm-name)
+  (id         running-vm-id)
   (directory  running-vm-directory)
   (usb?       running-vm-usb?)
-  (qmp-socket running-vm-qmp-socket))
+  (qmp-socket running-vm-qmp-socket)
+  (ssh        running-vm-ssh))              ;alist | #f
 
 ;; Without XDG_RUNTIME_DIR, other users can create entries in /tmp.
 (define (owned? file)
@@ -59,9 +65,12 @@
                  (call-with-input-file file read)))
       ((? list? info)
        (running-vm (assq-ref info 'name)
+                   (string-drop (basename directory)
+                                (string-length %vm-directory-prefix))
                    (assq-ref info 'directory)
                    (assq-ref info 'usb?)
-                   (qmp-socket-file directory)))
+                   (qmp-socket-file directory)
+                   (assq-ref info 'ssh)))
       (_ #f))))
 
 (define* (running-vms #:optional (runtime (runtime-directory)))
@@ -206,7 +215,27 @@ rule can give you access to it")
   (call-with-qmp (running-vm-qmp-socket vm)
     (cut <> "device_del" `(("id" . ,(usb-device-name id))))))
 
-(define (stop-vm! vm)
+(define (attach-vm! vm)
+  "Run a login shell in /work of VM and return its exit status."
+  (match (running-vm-ssh vm)
+    (#f
+     (raise-exception
+      (formatted-message (G_ "~a was started by an older guix-microvm, \
+which does not allow attaching")
+                         (running-vm-name vm))))
+    (ssh
+     (wait-for-exit ((vm-ssh-spawner ssh) "cd /work && exec \"$SHELL\" -l"
+                     #:options '("-e" "none" "-t"))))))
+
+(define (kill-vm! vm)
+  ;; Writes the guest still caches would be lost.  A stuck guest must not
+  ;; keep it from being killed.
+  (and=> (running-vm-ssh vm)
+         (lambda (ssh)
+           (let ((pid (spawn-batch-ssh (vm-ssh-spawner ssh) "sync")))
+             (unless (exits-within? pid 10)
+               (kill pid SIGKILL)
+               (waitpid pid)))))
   (call-with-qmp (running-vm-qmp-socket vm)
     (lambda (execute)
       ;; QEMU may exit before it replies.

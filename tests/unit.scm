@@ -60,7 +60,7 @@
   guest-configuration)
 
 (define-private (guix-microvm control)
-  usb-id-matches? usb-host-arguments running-vm)
+  usb-id-matches? usb-host-arguments running-vm running-vm-ssh)
 
 (define-private (guix extensions microvm)
   string->forwarded-port launcher-flags project-directory read-project
@@ -652,6 +652,46 @@ echo y > sub/y"
   (sh-output (string-append "printf %s "
                             (shell-quote "it's \"$HOME\" `x` \\"))))
 
+(test-equal "child-alive?"
+  '(#t #f #f)
+  (let ((sleeper (spawn "sleep" '("sleep" "60")))
+        (done (spawn "true" '("true"))))
+    (let ((alive? (child-alive? sleeper)))
+      (kill sleeper SIGKILL)
+      (waitpid sleeper)
+      (let loop ()
+        (when (child-alive? done)
+          (usleep 10000)
+          (loop)))
+      (list alive? (child-alive? sleeper) (child-alive? done)))))
+
+(test-equal "exits-within?"
+  '(#f #f #t)
+  (let ((sleeper (spawn "sleep" '("sleep" "60")))
+        (done (spawn "true" '("true"))))
+    (let ((results (list (exits-within? sleeper 0.2)
+                         (exits-within? sleeper 0.25)
+                         (exits-within? done 5))))
+      (kill sleeper SIGKILL)
+      (waitpid sleeper)
+      results)))
+
+(test-equal "vm-ssh-spawner sends the secrets from their directory"
+  "s3cret\n"
+  (let ((directory (string-append tmp "/spawner-secrets")))
+    (write-file (string-append directory "/SECRET") "s3cret")
+    (let ((spawn-ssh (vm-ssh-spawner
+                      `((program . "sh")
+                        (options . ("-c" "echo \"$SECRET\""))
+                        (destination . "vm")
+                        (variables . ())
+                        (secrets . (,directory "SECRET"))))))
+      (ssh-output spawn-ssh "true"))))
+
+(test-equal "ssh-spawner"
+  "-F x -n -o BatchMode=yes -o ConnectTimeout=5 vm sync\n"
+  (ssh-output (ssh-spawner "echo" '("-F" "x") "vm") "sync"))
+
 (test-equal "remote-command"
   "cd /work && 'echo' 'it'\\''s'; echo $? > /s"
   (remote-command '("echo" "it's") '() "/s"))
@@ -995,7 +1035,7 @@ gives the commands received.  Each reply follows an event; the command
         (usb-host-arguments '(#x1050 . #x0407))))
 
 (test-equal "running-vms"
-  '(("a" "/p" #t))
+  '(("a" "a" "/p" #t ((program . "/ssh"))))
   (let* ((runtime (string-append tmp "/runtime"))
          (locks
           (filter-map (match-lambda
@@ -1005,7 +1045,8 @@ gives the commands received.  Each reply follows an event; the command
                            (write-file file
                                        (object->string
                                         `((name . ,name) (directory . "/p")
-                                          (usb? . #t))))
+                                          (usb? . #t)
+                                          (ssh . ((program . "/ssh"))))))
                            (and locked?
                                 (let ((port (open-input-file file)))
                                   (flock port LOCK_EX)
@@ -1017,15 +1058,16 @@ gives the commands received.  Each reply follows an event; the command
     (let ((vms (running-vms runtime)))
       (for-each close-port locks)
       (map (lambda (vm)
-             (list (running-vm-name vm) (running-vm-directory vm)
-                   (running-vm-usb? vm)))
+             (list (running-vm-name vm) (running-vm-id vm)
+                   (running-vm-directory vm) (running-vm-usb? vm)
+                   (running-vm-ssh vm)))
            vms))))
 
-(test-equal "stop-vm!"
+(test-equal "kill-vm!"
   '("qmp_capabilities" "quit")
   (let* ((file (string-append tmp "/stop.sock"))
          (server (fake-qmp-server file)))
-    (stop-vm! (running-vm "vm" "/p" #f file))
+    (kill-vm! (running-vm "vm" "id" "/p" #f file #f))
     (join-thread server)))
 
 (test-equal "call-with-qmp"
@@ -1044,9 +1086,13 @@ gives the commands received.  Each reply follows an event; the command
     "no USB device ffff is plugged in")
   (map (lambda (usb?)
          (error-message
-          (cut attach-usb! (running-vm "vm" "/p" usb? "/none.sock")
+          (cut attach-usb! (running-vm "vm" "id" "/p" usb? "/none.sock" #f)
                '(#xffff . #f))))
        '(#f #t)))
+
+(test-equal "attach-vm!, older VM"
+  "vm was started by an older guix-microvm, which does not allow attaching"
+  (error-message (cut attach-vm! (running-vm "vm" "id" "/p" #f "/none" #f))))
 
 (test-equal "normalize-file-name"
   '("/a/c" "/" "/a")

@@ -16,7 +16,7 @@ namespaces and Landlock, and user extended attributes on the file system of
 
 ## Usage
 ```
-guix microvm                            # login shell in /work
+guix microvm                            # login shell in /work, VM stays
 guix microvm -- make check              # run a command
 guix microvm -p 3000 -- npm run dev     # forward localhost:3000
 guix microvm --stateless -- make check  # fresh home, empty /work
@@ -25,8 +25,9 @@ guix microvm --merge -- make fmt        # merge the changes without asking
 guix microvm diff                       # changes of the running VM
 guix microvm --allow                    # trust new or changed project files
 guix microvm --vm=NAME                  # run a predefined microvm
-guix microvm list                       # running VMs
-guix microvm stop NAME
+guix microvm list                       # running VMs and their IDs
+guix microvm attach NAME                # another shell in it
+guix microvm kill NAME
 ```
 
 Predefined microvms come from `(CHANNEL vms ...)` modules of any channel.
@@ -59,6 +60,14 @@ Emacs shows the list as a review: `t` merges or skips, `TAB` shows the diff
 below, `RET` in a buffer and `a` all diffs, `C-c C-c` is done and `q` goes
 back to the question.
 
+A VM started for a login shell keeps running after it exits, until it is
+killed; then the launcher asks about its changes.  With several VMs of one
+name, `attach` and `kill` take the one of the current project, or the ID.
+
+`M-x guix-microvm-list` lists the running VMs: `RET` opens `/work` with TRAMP
+(`/microvm:ID:/work/`), `d` marks one to kill, `u` unmarks it, `x` kills the
+marked ones and `D` the one at point.
+
 The snapshot needs a copy-on-write file system, such as Btrfs, shared with
 `~/.local/share`; otherwise the VM sees the project live.  Renaming a
 directory of the snapshot fails with `EXDEV`; `mv` copies instead.  One VM at
@@ -73,6 +82,11 @@ Home, console log and `secrets` live in `~/.local/share/guix-microvm/NAME/`.
 `VM_BOOT_TIMEOUT` the 120 seconds to wait for SSH, `VM_FS_CACHE` virtiofsd's
 `--cache` mode (`auto`) and `VM_SERIAL` sends the console to a QEMU `-serial`
 instead of the log.
+
+VMs with `wayland?` show their windows on the host's Wayland session, which
+hides screen capture, virtual input and clipboard managers from them if it
+supports the security context protocol.  They see the clipboard while one of
+their windows has focus.
 
 VMs with `usb?` can take a host device, which needs a udev rule giving you
 access:

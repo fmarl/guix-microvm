@@ -9,6 +9,7 @@
   #:export (null-port
             wait-for-exit
             child-alive?
+            exits-within?
             call-with-process
             server
             server-program
@@ -30,9 +31,23 @@
   (exit-status (cdr (waitpid pid))))
 
 (define (child-alive? pid)
-  (match (waitpid pid WNOHANG)
-    ((0 . _) #t)
-    (_ #f)))
+  "Return true if the child PID runs.  Reap it otherwise."
+  (catch 'system-error
+    (lambda ()
+      (zero? (car (waitpid pid WNOHANG))))
+    (lambda args
+      (if (= ECHILD (system-error-errno args))
+          #f
+          (apply throw args)))))
+
+(define (exits-within? pid seconds)
+  "Return true if the child PID exits within SECONDS.  Reap it then."
+  (let loop ((tenths (* 10 seconds)))
+    (cond ((not (child-alive? pid)) #t)
+          ((<= tenths 0) #f)
+          (else
+           (usleep 100000)
+           (loop (- tenths 1))))))
 
 (define* (call-with-process program args proc
                             #:key (error (current-error-port)))
@@ -44,8 +59,10 @@ Stop it when PROC returns or exits."
       (const #t)
       (cut proc pid)
       (lambda ()
-        (false-if-exception (kill pid SIGTERM))
-        (false-if-exception (waitpid pid))))))
+        ;; Once reaped, PID may be another process's.
+        (when (child-alive? pid)
+          (kill pid SIGTERM)
+          (waitpid pid))))))
 
 ;; A program that is up once it has created its socket.
 (define-record-type <server>
