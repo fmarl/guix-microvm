@@ -80,20 +80,30 @@
         (layer-merged layer)))
 
 (define (snapshot directory base data cp)
-  "Snapshot DIRECTORY at BASE with CP and return true, or false if its file
-system cannot share data with DATA."
-  (or (zero? (wait-for-exit
-              (spawn cp (list cp "-a" "--reflink=always" "--" directory base)
-                     #:input (null-port) #:error (null-port))))
-      (let ((program (%program-name)))
-        (when (file-exists? base)
-          (delete-tree base))
-        (format (current-error-port)
-                "~a: warning: cannot snapshot ~a, which needs a copy-on-write \
-file system, such as Btrfs, shared with ~a
+  "Snapshot DIRECTORY at BASE with CP and return true, or warn and return
+false."
+  (call-with-temporary-file (dirname base)
+    (lambda (errors)
+      (or (zero? (wait-for-exit
+                  (call-with-output-file errors
+                    (lambda (port)
+                      (spawn cp (list cp "-a" "--reflink=always" "--"
+                                      directory base)
+                             #:input (null-port) #:error port)))))
+          (let ((program (%program-name))
+                (error (match (string-split
+                               (call-with-input-file errors get-string-all)
+                               #\newline)
+                         ((line . _) line))))
+            (when (file-exists? base)
+              (delete-tree base))
+            (format (current-error-port)
+                    "~a: warning: cannot snapshot ~a: ~a
+~a: warning: a snapshot needs a copy-on-write file system, such as Btrfs, \
+shared with ~a
 ~a: warning: the VM sees ~a change; do not change it while the VM runs~%"
-                program directory data program directory)
-        #f)))
+                    program directory error program data program directory)
+            #f)))))
 
 ;; overlayfs mounts without them, but then fails to remove directories that
 ;; held whiteouts.
@@ -144,7 +154,6 @@ extended attributes; tmpfs needs CONFIG_TMPFS_XATTR" data))
       #:unwind? #t)))
 
 (define (open-layer root)
-  "Return the layer in ROOT, or #f if there is none."
   (let ((project (false-if-exception
                   (call-with-input-file (file-in root "project")
                     get-string-all)))
@@ -183,7 +192,6 @@ same file."
           (else (unchanged? file stat other other-stat)))))
 
 (define (host-unchanged? layer file)
-  "Return true if the host has FILE as it was when LAYER started."
   (match (layer-manifest layer)
     (#f (same-entry? (host-file layer file) (lower-file layer file)))
     (manifest
@@ -247,7 +255,7 @@ the layer has no snapshot."
   (make-change file kind type executable?)
   change?
   (file        change-file)
-  (kind        change-kind)         ;'added | 'modified | 'deleted | 'replaced
+  (kind        change-kind)         ;of 'entry-kind', or 'unreadable
   (type        change-type)         ;in the VM, or before if deleted
   (executable? change-executable?)) ;made executable by the VM
 
@@ -261,27 +269,27 @@ the layer has no snapshot."
   (equal? "y" (false-if-exception
                (getxattr directory "user.overlay.opaque"))))
 
+(define (shows-through? upper stat lower-stat)
+  (and lower-stat
+       (eq? 'directory (stat:type stat))
+       (eq? 'directory (stat:type lower-stat))
+       (not (opaque? upper))))
+
 (define (entry-kind upper stat lower lower-stat)
-  "Return the kind of change that UPPER, with STAT, makes to LOWER, or #f,
-whether to look into it, and whether LOWER shows through it."
-  (let ((lower-directory? (and lower-stat
-                               (eq? 'directory (stat:type lower-stat)))))
-    (cond ((whiteout? stat)
-           (values (and lower-stat 'deleted) #f #f))
-          ((eq? 'directory (stat:type stat))
-           (cond ((not lower-stat) (values 'added #t #f))
-                 ((and lower-directory? (not (opaque? upper)))
-                  (values (and (not (= (stat:perms stat)
-                                       (stat:perms lower-stat)))
-                               'modified)
-                          #t #t))
-                 (else (values 'replaced #t #f))))
-          ((not lower-stat) (values 'added #f #f))
-          (lower-directory? (values 'replaced #f #f))
-          ;; Copying up, as 'touch' or 'chmod' to the same mode do, leaves
-          ;; the file as it was.
-          ((unchanged? upper stat lower lower-stat) (values #f #f #f))
-          (else (values 'modified #f #f)))))
+  "Return the kind of change that UPPER, with STAT, makes to LOWER, with
+LOWER-STAT, or #f."
+  (cond ((whiteout? stat) (and lower-stat 'deleted))
+        ((not lower-stat) 'added)
+        ((shows-through? upper stat lower-stat)
+         (and (not (= (stat:perms stat) (stat:perms lower-stat)))
+              'modified))
+        ((or (eq? 'directory (stat:type stat))
+             (eq? 'directory (stat:type lower-stat)))
+         'replaced)
+        ;; Copying up, as 'touch' or 'chmod' to the same mode do, leaves the
+        ;; file as it was.
+        ((unchanged? upper stat lower lower-stat) #f)
+        (else 'modified)))
 
 (define (made-executable? layer file stat)
   (define (executable? perms)
@@ -293,35 +301,44 @@ whether to look into it, and whether LOWER shows through it."
                  (executable? (base-perms layer file))))))
 
 (define (layer-changes layer)
-  "Return the changes that LAYER makes to its project, sorted by file."
-  (define (walk directory lower? result)
+  "Return the changes that LAYER makes to its project, sorted by file.  A
+directory that the host user cannot read is an 'unreadable change, without
+the changes in it."
+  (define (walk directory names lower? result)
     (fold (lambda (name result)
             (let* ((file (file-in directory name))
-                   (stat (lstat (upper-file layer file)))
-                   (lower-stat (and lower? (file-stat (lower-file layer file))))
-                   (kind descend? lower-below?
-                         (entry-kind (upper-file layer file) stat
-                                     (lower-file layer file) lower-stat))
+                   (upper (upper-file layer file))
+                   (lower (lower-file layer file))
+                   (stat (lstat upper))
+                   (lower-stat (and lower? (file-stat lower)))
+                   (children (and (eq? 'directory (stat:type stat))
+                                  (or (directory-files upper) 'unreadable)))
+                   (kind (if (eq? children 'unreadable)
+                             'unreadable
+                             (entry-kind upper stat lower lower-stat)))
                    (result (if kind
                                (cons (make-change
                                       file kind
-                                      (if (eq? kind 'deleted)
-                                          (stat:type lower-stat)
-                                          (stat:type stat))
+                                      (stat:type (if (eq? kind 'deleted)
+                                                     lower-stat
+                                                     stat))
                                       (made-executable? layer file stat))
                                      result)
                                result)))
-              (if descend?
-                  (walk file lower-below? result)
-                  result)))
+              (match children
+                ((? list?)
+                 (walk file children
+                       (shows-through? upper stat lower-stat) result))
+                (_ result))))
           result
-          (or (directory-files (upper-file layer directory))
-              (fail "cannot read /work/~a in the VM; make it readable there, \
-or discard the changes" directory))))
+          names))
 
-  (sort (walk "" #t '())
-        (lambda (change other)
-          (string<? (change-file change) (change-file other)))))
+  (match (directory-files (layer-upper layer))
+    (#f (list (make-change "." 'unreadable 'directory #f)))
+    (names
+     (sort (walk "" names #t '())
+           (lambda (change other)
+             (string<? (change-file change) (change-file other)))))))
 
 (define (copy-entry source target)
   (let ((stat (lstat source)))
@@ -352,19 +369,22 @@ after the VM, and delete them when it returns."
       (lambda ()
         (mkdir before)
         (mkdir after)
+        ;; A file that the VM left unreadable is missing from the trees.
         (for-each (lambda (change)
                     (let ((file (change-file change)))
-                      (match (change-kind change)
-                        ('added #t)
-                        ((or 'deleted 'replaced)
-                         (copy-tree (lower-file layer file)
-                                    (file-in before file)))
-                        ('modified
-                         (copy-entry (lower-file layer file)
-                                     (file-in before file))))
+                      (false-if-exception
+                       (match (change-kind change)
+                         ('added #t)
+                         ((or 'deleted 'replaced)
+                          (copy-tree (lower-file layer file)
+                                     (file-in before file)))
+                         ('modified
+                          (copy-entry (lower-file layer file)
+                                      (file-in before file)))))
                       (unless (eq? 'deleted (change-kind change))
-                        (copy-entry (upper-file layer file)
-                                    (file-in after file)))))
+                        (false-if-exception
+                         (copy-entry (upper-file layer file)
+                                     (file-in after file))))))
                   changes)
         (proc before after))
       (cut delete-tree root))))

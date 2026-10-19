@@ -12,7 +12,8 @@
   #:export (home-directory
             data-directory
             call-with-project-lock
-            project-layers))
+            project-layers
+            layers-around))
 
 (define (home-directory)
   (canonicalize-path (getenv "HOME")))
@@ -65,10 +66,17 @@ VM runs on DIRECTORY, one of its parents or one of its subdirectories."
         (thunk))
       (cut close-port port))))
 
+(define (layers data)
+  (let ((directory (file-in data "layers")))
+    (filter-map (compose open-layer (cut file-in directory <>))
+                (or (directory-files directory) '()))))
+
 (define (project-layers data directory)
-  "Return the layers in DATA over the project DIRECTORY."
-  (let ((layers (file-in data "layers")))
-    (filter (lambda (layer)
-              (string=? directory (layer-project layer)))
-            (filter-map (compose open-layer (cut file-in layers <>))
-                        (or (directory-files layers) '())))))
+  (filter (lambda (layer)
+            (string=? directory (layer-project layer)))
+          (layers data)))
+
+(define (layers-around data file)
+  (filter (lambda (layer)
+            (contains-file? (layer-project layer) file))
+          (layers data)))
