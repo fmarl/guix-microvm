@@ -14,7 +14,8 @@
   #:use-module (guix-microvm build merge)
   #:use-module (guix-microvm build process)
   #:export (report-skipped
-            resolve-layer))
+            show-diff
+            resolve-layer!))
 
 (define (count n singular plural)
   (format #f "~a ~a" n (if (= n 1) singular plural)))
@@ -142,10 +143,10 @@ commented out, and return those left, or #f if the editor fails."
                        changes)))))))
 
 (define* (merge-changes layer changes #:key git on-conflict protected-files)
-  "Merge CHANGES of LAYER into its project and return 'merged, or
-'incomplete if files could not be written.  If ON-CONFLICT is 'abort, merge
-nothing and return 'conflict on a conflict; if it is 'markers, leave
-conflict markers or keep the host's version."
+  "Merge CHANGES of LAYER into its project.  Return 'merged, or
+'incomplete if files could not be written.  On a conflict, merge nothing and
+return 'conflict if ON-CONFLICT is 'abort; if it is 'markers, leave conflict
+markers or keep the host's version."
   (let* ((directory (mkdtemp (layer-file layer "merge-XXXXXX")))
          (plan (plan-merge layer changes #:git git #:directory directory
                            #:protected-files protected-files))
@@ -156,7 +157,7 @@ conflict markers or keep the host's version."
           (report "merged nothing; the changes stay in ~a"
                   (layer-directory layer))
           'conflict)
-        (let* ((problems (apply-plan layer plan))
+        (let* ((problems (apply-plan! layer plan))
                (failures (remove (lambda (problem)
                                    (memq (problem-reason problem)
                                          '(not-empty special-file)))
@@ -165,7 +166,7 @@ conflict markers or keep the host's version."
           (if (null? failures)
               'merged
               (begin
-                (forget-merged layer plan failures)
+                (forget-merged! layer plan failures)
                 'incomplete))))))
 
 (define (ask-action layer changes protected git)
@@ -203,14 +204,13 @@ conflict markers or keep the host's version."
                     (sigaction signal (car handler) (cdr handler)))
                   signals handlers)))))
 
-(define* (resolve-layer layer #:key git policy (protected-files '())
+(define* (resolve-layer! layer #:key git policy (protected-files '())
                         previous?)
-  "Ask what to do with the changes of LAYER, or merge, discard or keep
-them as POLICY, 'merge, 'discard or 'keep, says.  Return 'merged,
-'discarded, 'kept, 'conflict or 'incomplete, if files could not be
-written; LAYER is gone after 'merged and 'discarded."
+  "Ask what to do with the changes of LAYER, unless POLICY is 'merge,
+'discard or 'keep.  Return 'merged, 'discarded, 'kept, 'conflict or
+'incomplete; LAYER is gone after 'merged and 'discarded."
   (define (discard)
-    (delete-layer layer)
+    (delete-layer! layer)
     'discarded)
 
   (define (keep)
@@ -234,7 +234,7 @@ written; LAYER is gone after 'merged and 'discarded."
                          (report "not merging ~a: protected"
                                  (change-file change)))
                        (lset-difference eq? protected selected))
-             (delete-layer layer)
+             (delete-layer! layer)
              'merged)
             ('conflict 'conflict)
             ('incomplete (keep) 'incomplete)))
@@ -261,3 +261,31 @@ written; LAYER is gone after 'merged and 'discarded."
                  ('discard (discard))
                  ('keep (keep))
                  (selected (merge selected 'markers))))))))
+
+(define (selected-changes changes files)
+  (if (null? files)
+      changes
+      (filter (lambda (change)
+                (any (lambda (selected)
+                       (or (string-null? selected)
+                           (contains-file? selected (change-file change))))
+                     files))
+              changes)))
+
+(define* (show-diff layer files #:key git tool (protected-files '()))
+  "Show the changes of LAYER to FILES, relative to its project, or to all
+files, with 'git diff' or with TOOL, which gets the old and new directory."
+  (let* ((groups (classify-changes layer #:git git
+                                   #:protected-files protected-files))
+         (changes (selected-changes (append (assq-ref groups 'mergeable)
+                                            (assq-ref groups 'protected))
+                                    files)))
+    (report-skipped groups)
+    (if (null? changes)
+        (display "no changes\n")
+        (call-with-diff-trees layer changes
+          (lambda (old new)
+            (let ((status (wait-for-exit (git-diff-process git tool old new))))
+              (unless (<= status (if tool 0 1))
+                (fail "~a exited with status ~a" (or tool "git diff")
+                      status))))))))

@@ -202,11 +202,11 @@ arguments up to \"--\" and then executes the command after them."
 
 (define mount-store
   (namespace-wrapper "mount-store" '(guix-microvm build shares)
-                     'mount-store-items))
+                     'mount-store-items!))
 
 (define mount-overlay
   (namespace-wrapper "mount-overlay" '(guix-microvm build layer)
-                     'mount-overlay))
+                     'mount-overlay!))
 
 (define (microvm-profile vm)
   (and=> (microvm-manifest vm)

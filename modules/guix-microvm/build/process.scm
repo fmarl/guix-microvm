@@ -50,11 +50,12 @@
            (loop (- tenths 1))))))
 
 (define* (call-with-process program args proc
-                            #:key (error (current-error-port)))
-  "Start PROGRAM with ARGS, stderr to ERROR, and call PROC with its PID.
-Stop it when PROC returns or exits."
+                            #:key (output (current-output-port))
+                            (error (current-error-port)))
+  "Start PROGRAM with ARGS, stdout to OUTPUT and stderr to ERROR, and call
+PROC with its PID.  Stop it when PROC returns or exits."
   (let ((pid (spawn program (cons program args)
-                    #:input (null-port) #:error error)))
+                    #:input (null-port) #:output output #:error error)))
     (dynamic-wind
       (const #t)
       (cut proc pid)
@@ -75,21 +76,25 @@ Stop it when PROC returns or exits."
 (define (socket-file directory name)
   (string-append directory "/" name ".sock"))
 
-(define (wait-for-socket file pid)
+(define (wait-for-socket file pid on-failure)
   (let loop ()
     (unless (file-exists? file)
       (unless (child-alive? pid)
-        (fail "no ~a, the program serving it exited" file))
+        (on-failure (format #f "no ~a, the program serving it exited" file)))
       (usleep 100000)
       (loop))))
 
-(define (call-with-servers servers thunk)
-  "Start SERVERS in order, call THUNK once all are up, and stop them when it
-returns or exits."
+(define* (call-with-servers servers thunk
+                            #:key (log (current-error-port))
+                            (on-failure (cut fail "~a" <>)))
+  "Start SERVERS in order, their output to LOG, call THUNK once all are up,
+and stop them when it returns or exits.  Call ON-FAILURE with a message if
+one exits first."
   (match servers
     (() (thunk))
     ((first rest ...)
      (call-with-process (server-program first) (server-arguments first)
        (lambda (pid)
-         (wait-for-socket (server-socket first) pid)
-         (call-with-servers rest thunk))))))
+         (wait-for-socket (server-socket first) pid on-failure)
+         (call-with-servers rest thunk #:log log #:on-failure on-failure))
+       #:output log #:error log))))

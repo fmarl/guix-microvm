@@ -15,6 +15,7 @@
   #:use-module (gnu packages base)
   #:use-module (gnu packages bash)
   #:use-module (gnu packages networking)
+  #:use-module (guix-microvm build protocol)
   #:use-module (guix-microvm kernel)
   #:export (microvm-guest-configuration
             microvm-guest-configuration?
@@ -85,7 +86,7 @@
 (define (ssh-vsock-service port)
   (shepherd-service
     (provision '(ssh-vsock))
-    (requirement '(ssh-daemon ssh-authorized-key work))
+    (requirement '(ssh-daemon ssh-authorized-key work microvm-host-name))
     (start #~(make-forkexec-constructor
               (list #$(file-append socat "/bin/socat")
                     #$(string-append "VSOCK-LISTEN:" (number->string port)
@@ -100,7 +101,7 @@
     (one-shot? #t)
     (modules %kernel-option-modules)
     (start #~(lambda _
-               (let ((key #$(kernel-option "guix-microvm.ssh-key"))
+               (let ((key #$(kernel-option %ssh-key-option))
                      (file #$(string-append "/etc/ssh/authorized_keys.d/"
                                             user)))
                  (when key
@@ -108,6 +109,25 @@
                      (lambda (port)
                        (format port "ssh-ed25519 ~a~%" key)))
                    (chmod file #o444))
+                 #t)))))
+
+(define microvm-host-name-service
+  (shepherd-service
+    (provision '(microvm-host-name))
+    (requirement '(host-name))
+    (one-shot? #t)
+    (modules `((ice-9 textual-ports) ,@%kernel-option-modules))
+    (start #~(lambda _
+               (let ((name #$(kernel-option %host-name-option)))
+                 (when name
+                   (let ((hosts (call-with-input-file "/etc/hosts"
+                                  get-string-all)))
+                     (delete-file "/etc/hosts")
+                     (call-with-output-file "/etc/hosts"
+                       (lambda (port)
+                         (format port "~a127.0.0.1 ~a~%::1 ~a~%"
+                                 hosts name name))))
+                   (sethostname name))
                  #t)))))
 
 (define (work-service uid gid)
@@ -118,21 +138,19 @@
     (modules %kernel-option-modules)
     (start #~(lambda _
                (mkdir-p "/work")
-               (if #$(kernel-option "guix-microvm.volatile")
+               (if #$(kernel-option %volatile-option)
                    (mount "none" "/work" "tmpfs" 0
                           #$(format #f "mode=755,size=50%,uid=~a,gid=~a"
                                     uid gid))
-                   (mount "work" "/work" "virtiofs"))
+                   (mount #$%work-tag "/work" "virtiofs"))
                #t))))
 
 (define (guest-shepherd-services config)
   (match-record config <microvm-guest-configuration> (user ssh-port uid gid)
     (list (work-service uid gid)
+          microvm-host-name-service
           (ssh-vsock-service ssh-port)
           (ssh-authorized-key-service user))))
-
-;; Same as in (guix-microvm build shares).
-(define %host-key-name ".guix-microvm-ssh-host-key")
 
 (define (guest-activation config)
   (match-record config <microvm-guest-configuration> (uid gid)
@@ -295,10 +313,10 @@ tmpfs in volatile VMs.")))
                           (type "tmpfs")
                           (options "mode=755")
                           (check? #f))
-                        (virtiofs-file-system "store" "/gnu/store"
+                        (virtiofs-file-system %store-tag "/gnu/store"
                                               #:read-only? #t
                                               #:needed-for-boot? #t)
-                        (virtiofs-file-system "home" "/home")
+                        (virtiofs-file-system %home-tag "/home")
                         %pseudo-terminal-file-system
                         %shared-memory-file-system))
     (skeletons (cons `(".bash_profile"

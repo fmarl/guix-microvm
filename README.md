@@ -22,12 +22,13 @@ guix microvm -p 3000 -- npm run dev     # forward localhost:3000
 guix microvm --stateless -- make check  # fresh home, empty /work
 guix microvm --volatile                 # empty /work, no project
 guix microvm --merge -- make fmt        # merge the changes without asking
-guix microvm diff                       # changes of the running VM
+guix microvm diff                       # changes of the VM on the project
 guix microvm --allow                    # trust new or changed project files
 guix microvm --vm=NAME                  # run a predefined microvm
-guix microvm list                       # running VMs and their IDs
-guix microvm attach NAME                # another shell in it
-guix microvm kill NAME
+guix microvm list                       # running VMs, their IDs and state
+guix microvm attach [NAME]              # another shell in it
+guix microvm kill [--merge|--discard] [NAME]
+guix microvm resolve [--merge|--discard]  # changes a killed VM left
 ```
 
 Predefined microvms come from `(CHANNEL vms ...)` modules of any channel.
@@ -60,13 +61,21 @@ Emacs shows the list as a review: `t` merges or skips, `TAB` shows the diff
 below, `RET` in a buffer and `a` all diffs, `C-c C-c` is done and `q` goes
 back to the question.
 
-A VM started for a login shell keeps running after it exits, until it is
-killed; then the launcher asks about its changes.  With several VMs of one
-name, `attach` and `kill` take the one of the current project, or the ID.
+A VM started for a login shell keeps running in the background after it
+exits; `guix microvm` in the project, without options that only apply to a
+new VM, attaches to it.  `kill` then asks about its changes, unless `--merge`
+or `--discard`; without a terminal, they are kept for `resolve` or the next
+run.  The output of the VM's helper programs goes to its log.
+
+A VM is named `PROJECT-vm` after the directory of its project, or `NAME-vm`
+with `--vm=NAME`, with `-2`, `-3` and so on if the name is taken; it is also
+its host name.  `attach` and `kill` take a name or ID, or else
+the VM of the current project.
 
 `M-x guix-microvm-list` lists the running VMs: `RET` opens `/work` with TRAMP
-(`/microvm:ID:/work/`), `d` marks one to kill, `u` unmarks it, `x` kills the
-marked ones and `D` the one at point.
+(`/microvm:ID:/work/`), `s` a shell there, `d` marks one to kill, `u` unmarks
+it, `x` kills the marked ones and `D` the one at point.  `M-x
+guix-microvm-resolve` resolves the changes left on a project.
 
 The snapshot needs a copy-on-write file system, such as Btrfs, shared with
 `~/.local/share`; otherwise the VM sees the project live.  Renaming a
@@ -76,7 +85,8 @@ a time runs on a project.
 `--volatile`, `--stateless` and `(volatile? #t)` give the VM an empty `/work`
 instead of the project; `--persistent` brings it back.
 
-Home, console log and `secrets` live in `~/.local/share/guix-microvm/NAME/`.
+Home, console log and `secrets` live in `~/.local/share/guix-microvm/HOST/`,
+after the `host-name` of the VM's operating system, `vm` for the base VM.
 
 `VM_MEMORY` and `VM_CPUS` override `memory-size` (MiB) and `cpu-count`,
 `VM_BOOT_TIMEOUT` the 120 seconds to wait for SSH, `VM_FS_CACHE` virtiofsd's
@@ -92,8 +102,8 @@ VMs with `usb?` can take a host device, which needs a udev rule giving you
 access:
 
 ```
-guix microvm usb attach librewolf 1050
-guix microvm usb detach librewolf 1050
+guix microvm usb attach NAME 1050
+guix microvm usb detach NAME 1050
 ```
 
 ## Development

@@ -5,9 +5,13 @@
   #:use-module ((guix build utils) #:select (delete-file-recursively))
   #:use-module ((ice-9 binary-ports) #:select (get-bytevector-n))
   #:use-module ((ice-9 ftw) #:select (file-system-fold scandir))
+  #:use-module (ice-9 match)
+  #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:export (file-in
             contains-file?
+            normalize-file-name
+            file-under
             file-stat
             file-type
             directory?
@@ -27,6 +31,29 @@
   (or (string=? directory "/")
       (string=? directory file)
       (string-prefix? (string-append directory "/") file)))
+
+(define (normalize-file-name file)
+  "Return the absolute FILE without empty, . and .. parts."
+  (string-append
+   "/"
+   (string-join (reverse
+                 (fold (lambda (part result)
+                         (match part
+                           ((or "" ".") result)
+                           (".." (if (pair? result) (cdr result) result))
+                           (_ (cons part result))))
+                       '()
+                       (string-split file #\/)))
+                "/")))
+
+(define (file-under directory file)
+  "Return the absolute FILE relative to DIRECTORY, or #f if it is
+outside."
+  (let ((file (normalize-file-name file)))
+    (cond ((string=? file directory) "")
+          ((string-prefix? (string-append directory "/") file)
+           (string-drop file (+ 1 (string-length directory))))
+          (else #f))))
 
 (define (file-stat file)
   (false-if-exception (lstat file)))

@@ -11,6 +11,7 @@
   #:use-module (guix-microvm build layer)
   #:export (home-directory
             data-directory
+            check-shareable
             call-with-project-lock
             project-layers
             layers-around))
@@ -22,6 +23,21 @@
   (string-append (or (getenv "XDG_DATA_HOME")
                      (string-append (home-directory) "/.local/share"))
                  "/guix-microvm"))
+
+(define (canonical-data-directory)
+  (let ((data (data-directory)))
+    (mkdir-p data)
+    (canonicalize-path data)))
+
+(define (check-shareable directory)
+  (let ((home (home-directory)))
+    (cond ((contains-file? directory home)
+           (fail "not sharing ~a, which contains the home directory, as a \
+project; use a subdirectory, or --volatile" directory))
+          ;; The snapshot of the project would include the layers.
+          ((contains-file? directory (canonical-data-directory))
+           (fail "not sharing ~a, which contains ~a, as a project"
+                 directory (data-directory))))))
 
 (define (overlap? directory other)
   (or (contains-file? directory other)
@@ -37,9 +53,10 @@
         (lambda args
           (= EWOULDBLOCK (system-error-errno args)))))))
 
-(define (call-with-project-lock data directory thunk)
-  "Call THUNK holding the lock of the project DIRECTORY in DATA.  Fail if a
-VM runs on DIRECTORY, one of its parents or one of its subdirectories."
+(define* (call-with-project-lock data directory thunk #:key wait?)
+  "Call THUNK holding the lock of the project DIRECTORY in DATA, waiting for
+it if WAIT?.  Fail if a VM runs on DIRECTORY, one of its parents or one of
+its subdirectories."
   (let* ((locks (file-in data "locks"))
          (name (uri-encode directory))
          ;; Appending leaves the lock file of a running VM as it is.
@@ -51,7 +68,7 @@ VM runs on DIRECTORY, one of its parents or one of its subdirectories."
       (lambda ()
         (catch 'system-error
           (lambda ()
-            (flock port (logior LOCK_EX LOCK_NB)))
+            (flock port (if wait? LOCK_EX (logior LOCK_EX LOCK_NB))))
           (lambda _
             (fail "a VM already runs on ~a" directory)))
         ;; Two VMs starting at once on overlapping projects may both fail

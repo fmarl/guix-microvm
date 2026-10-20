@@ -3,66 +3,46 @@
 
 (define-module (guix extensions microvm)
   #:use-module (guix derivations)
-  #:use-module (guix discovery)
   #:use-module (guix gexp)
   #:use-module (guix monads)
-  #:use-module ((guix profiles) #:select (manifest?))
   #:use-module (guix scripts)
   #:use-module (guix scripts build)
   #:use-module ((guix status) #:select (with-status-verbosity))
   #:use-module (guix store)
-  #:use-module ((guix diagnostics)
-                #:select (formatted-message &fix-hint))
   #:use-module (guix ui)
-  #:use-module ((guix utils)
-                #:select (config-directory with-atomic-file-output))
-  #:use-module ((guix base16) #:select (bytevector->base16-string))
-  #:use-module ((gcrypt hash) #:select (sha256))
-  #:use-module (gnu system)
-  #:use-module (guix-microvm base)
-  #:use-module (guix-microvm microvm)
   #:use-module (guix-microvm control)
-  #:use-module ((guix-microvm build error) #:select (%program-name))
+  #:use-module (guix-microvm microvm)
+  #:use-module (guix-microvm project)
   #:use-module ((guix-microvm build files) #:select (contains-file?))
-  #:use-module ((guix-microvm build git) #:select (git-diff-process))
-  #:use-module ((guix-microvm build layer)
-                #:select (layer-project change-file call-with-diff-trees))
-  #:use-module ((guix-microvm build merge) #:select (classify-changes))
-  #:use-module ((guix-microvm build microvm)
-                #:select (check-shareable volatile-vm?))
-  #:use-module ((guix-microvm build review) #:select (report-skipped))
-  #:use-module ((guix-microvm build state)
-                #:select (data-directory layers-around))
+  #:use-module ((guix-microvm build invocation) #:select (volatile-vm?))
   #:use-module ((guix-microvm build process) #:select (wait-for-exit))
-  #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
-  #:use-module (ice-9 eval-string)
-  #:use-module ((ice-9 exceptions) #:select (exception-kind exception-args))
-  #:use-module ((ice-9 ftw) #:select (scandir))
+  #:use-module ((guix-microvm build registry) #:select (runtime-directory))
+  #:use-module ((guix-microvm build state) #:select (check-shareable))
   #:use-module (ice-9 match)
-  #:use-module (ice-9 textual-ports)
-  #:use-module ((rnrs bytevectors) #:select (string->utf8 utf8->string))
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
-  #:use-module (srfi srfi-34)
-  #:use-module ((srfi srfi-35) #:select (condition make-compound-condition))
   #:use-module (srfi srfi-37)
   #:use-module (srfi srfi-71)
   #:export (guix-microvm))
 
 (define (show-help)
   (display (G_ "Usage: guix microvm [OPTION]... [-- COMMAND...]
-   or: guix microvm list
-   or: guix microvm attach NAME
-   or: guix microvm kill NAME
+   or: guix microvm list [--format=sexp]
+   or: guix microvm attach [NAME]
+   or: guix microvm kill [--merge|--discard] [NAME]
+   or: guix microvm resolve [--merge|--discard]
    or: guix microvm usb attach|detach NAME VENDOR[:PRODUCT]
    or: guix microvm diff [--tool=COMMAND] [FILE...]
 Run COMMAND, or a login shell, in a microvm sharing the project directory at
 /work.  The microvm is the one vm.scm defines, or the base VM, with the
 packages of manifest.scm.  A microvm running a login shell keeps running
-after it exits, until it is killed.
+after it exits, until it is killed.  If the project's microvm runs, COMMAND
+or the shell runs in it, unless options ask for a new one.
 
 Or list the running microvms, open a login shell in the running microvm NAME,
-or kill it.  NAME may also be the ID that 'list' shows.
+or kill it, then ask about its changes unless --merge or --discard.  NAME
+may also be the ID that 'list' shows, and defaults to the microvm of the
+current project.  Or ask about the changes a killed microvm left.
 
 Or show the changes the microvm on the project made to FILE, or to all
 files, with 'git diff' or with COMMAND, which gets the old and new directory.
@@ -159,208 +139,11 @@ sets OTHER-KEY."
               (() '())
               ((_ command ...) command)))))
 
-(define (vm-module-directories)
-  "Return the CHANNEL/vms directories of %load-path, as pairs of the
-directory in %load-path and CHANNEL/vms."
-  (define (directory? file)
-    (and=> (stat file #f)
-           (lambda (st)
-             (eq? 'directory (stat:type st)))))
-
-  (append-map (lambda (directory)
-                (filter-map (lambda (name)
-                              (let ((sub (string-append name "/vms")))
-                                (and (directory? (string-append directory
-                                                                "/" sub))
-                                     (cons directory sub))))
-                            (or (scandir directory
-                                         (negate (cut member <> '("." ".."))))
-                                '())))
-              %load-path))
-
-(define (predefined-microvms)
-  "Return the microvms the (CHANNEL vms ...) modules export, as an alist by
-name."
-  (fold-module-public-variables*
-   (lambda (module symbol variable result)
-     (let ((value (variable-ref variable)))
-       (if (microvm? value)
-           (alist-cons (symbol->string symbol) value result)
-           result)))
-   '()
-   (all-modules (vm-module-directories))))
-
-(define (lookup-microvm name)
-  (let ((microvms (predefined-microvms)))
-    (or (assoc-ref microvms name)
-        (leave (G_ "~a: no such microvm, available: ~a~%")
-               name (string-join (sort (delete-duplicates (map car microvms))
-                                       string<?)
-                                 ", ")))))
-
-(define %project-file-names
-  '("vm.scm" "manifest.scm"))
-
-(define (project-directory)
-  "Return the nearest directory, from the current one up, that contains
-vm.scm or manifest.scm, or #f."
-  (let loop ((directory (getcwd)))
-    (cond ((any (lambda (file)
-                  (file-exists? (string-append directory "/" file)))
-                %project-file-names)
-           directory)
-          ((string=? directory "/") #f)
-          (else (loop (dirname directory))))))
-
-(define* (allowed-file #:key ensure?)
-  (string-append (config-directory #:ensure? ensure?) "/microvm-allowed"))
-
-(define (file-bytes file)
-  (match (call-with-input-file file get-bytevector-all #:binary #t)
-    ((? eof-object?) #vu8())
-    (bytes bytes)))
-
-;; Read once: the VM can change the files between check and load.
-(define (read-project project)
-  "Return vm.scm and manifest.scm of PROJECT as an alist of names and
-bytevectors, leaving out missing ones."
-  (if project
-      (filter-map (lambda (name)
-                    (let ((file (string-append project "/" name)))
-                      (and (file-exists? file)
-                           (cons name (file-bytes file)))))
-                  %project-file-names)
-      '()))
-
-(define (project-digest contents)
-  "Return a digest of CONTENTS, as returned by 'read-project'."
-  (bytevector->base16-string
-   (sha256
-    (string->utf8
-     (string-join
-      (map (lambda (name)
-             (match (assoc-ref contents name)
-               (#f name)
-               (bytes (string-append name " "
-                                     (bytevector->base16-string
-                                      (sha256 bytes))))))
-           %project-file-names)
-      "\n")))))
-
-(define (line->allowed-project line)
-  "Parse LINE of the allowed file into a directory and digest pair, or #f."
-  (match (string-index line #\space)
-    (#f #f)
-    (index (cons (string-drop line (+ index 1))
-                 (string-take line index)))))
-
-(define (allowed-projects)
-  "Return the allowed projects as an alist of directories and digests."
-  (catch 'system-error
-    (lambda ()
-      (filter-map line->allowed-project
-                  (string-split (call-with-input-file (allowed-file)
-                                  get-string-all)
-                                #\newline)))
-    (const '())))
-
-(define (allow-project! project contents)
-  (unless project
-    (leave (G_ "no vm.scm or manifest.scm to allow~%")))
-  (let ((others (alist-delete project (allowed-projects))))
-    (with-atomic-file-output (allowed-file #:ensure? #t)
-      (lambda (port)
-        (for-each (match-lambda
-                    ((directory . digest)
-                     (format port "~a ~a~%" digest directory)))
-                  (alist-cons project (project-digest contents) others))))))
-
-(define (project-allowed? project contents)
-  (equal? (assoc-ref (allowed-projects) project)
-          (project-digest contents)))
-
-(define (project-file project contents name)
-  "Return NAME in PROJECT paired with its contents, or #f."
-  (and=> (assoc-ref contents name)
-         (cut cons (string-append project "/" name) <>)))
-
-(define (project-files opts project contents)
-  "Return vm.scm, unless OPTS name a predefined microvm, and manifest.scm of
-PROJECT, each paired with its contents, or #f."
-  (values (and (not (assoc-ref opts 'vm))
-               (project-file project contents "vm.scm"))
-          (project-file project contents "manifest.scm")))
-
-(define (ensure-allowed project contents)
-  (unless (project-allowed? project contents)
-    (raise
-     (make-compound-condition
-      (formatted-message (G_ "not loading vm.scm and manifest.scm from '~a': \
-they are new or changed")
-                         project)
-      (condition
-       (&fix-hint
-        (hint (G_ "They run on the host, and the VM can change them.
-Review them, then run @command{guix microvm --allow}."))))))))
-
-(define (eval-file file bytes modules)
-  "Evaluate BYTES, read from FILE, in a new module using MODULES.  Return the
-last value."
-  ;; Guix conditions and 'leave' go on to 'with-error-handling'.
-  (guard (error ((not (memq (exception-kind error) '(quit %exception)))
-                 (raise
-                  (formatted-message
-                   (G_ "failed to load '~a': ~a")
-                   file
-                   (string-trim-right
-                    (call-with-output-string
-                      (cut print-exception <> #f
-                           (exception-kind error)
-                           (exception-args error))))))))
-    ;; Not compiled: 'eval-string' would compile in a fresh module, without
-    ;; MODULES.
-    (eval-string (utf8->string bytes)
-                 #:module (make-user-module modules)
-                 #:file file)))
-
-(define (load-object file kind valid? modules)
-  "Evaluate FILE, from 'project-file', in MODULES.  Return the value, failing
-unless VALID? says it is a KIND."
-  (match file
-    ((name . bytes)
-     (info (G_ "loading ~a from '~a'...~%") kind name)
-     (let ((object (eval-file name bytes modules)))
-       (if (valid? object)
-           object
-           (leave (G_ "~a: expected a ~a~%") name kind))))))
-
-(define (load-microvm file)
-  (load-object file "microvm" microvm?
-               '((guix-microvm microvm) (guix-microvm base) (gnu))))
-
-(define (load-manifest file)
-  (load-object file "manifest" manifest? '((guix profiles) (gnu))))
-
 (define (string->forwarded-port str)
   (match (map string->number (string-split str #\:))
     (((? integer? port)) port)
     (((? integer? host) (? integer? guest)) (cons host guest))
     (_ (leave (G_ "~a: expected PORT or PORT:GUEST-PORT~%") str))))
-
-(define (options->microvm opts vm-file manifest-file)
-  (let ((vm (cond ((assoc-ref opts 'vm) => lookup-microvm)
-                  (vm-file (load-microvm vm-file))
-                  (else (microvm (operating-system %base-vm))))))
-    (microvm
-      (inherit vm)
-      (manifest (if manifest-file
-                    (load-manifest manifest-file)
-                    (microvm-manifest vm)))
-      (ports (append (microvm-ports vm)
-                     (reverse (filter-map (match-lambda
-                                            (('port . port) port)
-                                            (_ #f))
-                                          opts)))))))
 
 (define (built-launcher vm)
   "Build VM's launcher and return its file name, in the store monad."
@@ -370,17 +153,30 @@ unless VALID? says it is a KIND."
       (return (derivation->output-path drv)))))
 
 (define (launcher-flags opts)
-  (filter-map (match-lambda
-                ((key . flag) (and (assoc-ref opts key) flag)))
-              '((stateless? . "--stateless")
-                (volatile? . "--volatile")
-                (persistent? . "--persistent")
-                (merge? . "--merge")
-                (discard? . "--discard"))))
+  (append (match (assoc-ref opts 'vm)
+            (#f '())
+            (name (list (string-append "--name=" name "-vm"))))
+          (filter-map (match-lambda
+                        ((key . flag) (and (assoc-ref opts key) flag)))
+                      '((stateless? . "--stateless")
+                        (volatile? . "--volatile")
+                        (persistent? . "--persistent")
+                        (merge? . "--merge")
+                        (discard? . "--discard")))))
+
+(define (gc-root store item)
+  "Return a new indirect garbage collector root for ITEM."
+  (let ((link (format #f "~a/guix-microvm-root.~a.~a" (runtime-directory)
+                      (getpid)
+                      (random (expt 2 32) (random-state-from-platform)))))
+    (symlink item link)
+    (add-indirect-root store link)
+    link))
 
 (define (call-with-launcher opts vm proc)
   "Build VM's launcher with the build options in OPTS and call PROC with its
-file name, unless OPTS ask for a dry run."
+file name and a garbage collector root for it, unless OPTS ask for a dry
+run."
   (with-store store
     (set-build-options-from-command-line store opts)
     (with-build-handler (build-notifier #:use-substitutes?
@@ -398,53 +194,159 @@ file name, unless OPTS ask for a dry run."
               ;; Keep the garbage collector off it until the store
               ;; connection closes.
               (add-temp-root store launcher)
-              (proc launcher))))))))
+              (proc launcher (gc-root store launcher)))))))))
 
-(define (run-launcher launcher directory command flags)
-  (wait-for-exit
-   (spawn launcher `(,launcher ,@flags ,directory "--" ,@command))))
-
-(define (run-in-microvm args)
-  "Run the command in ARGS in the project's microvm and exit with its
-status."
-  (let* ((opts command (parse-arguments args))
-         (project (project-directory))
+(define* (call-with-project-launcher opts proc #:key (check (const #t)))
+  "Call PROC with the project directory, the launcher of its microvm, built
+as OPTS say, and a garbage collector root for it.  Call CHECK with the
+microvm and the directory first."
+  (let* ((project (project-directory))
          (contents (read-project project))
-         (vm-file manifest-file (project-files opts project contents))
          (directory (or project (getcwd))))
     (when (assoc-ref opts 'allow?)
       (allow-project! project contents))
-    (when (or vm-file manifest-file)
-      (ensure-allowed project contents))
-    (let ((vm (options->microvm opts vm-file manifest-file)))
-      ;; Fail before building the launcher, which checks it too.
-      (unless (volatile-vm? #:stateless? (or (assoc-ref opts 'stateless?)
-                                             (microvm-stateless? vm))
-                            #:volatile? (assoc-ref opts 'volatile?)
-                            #:persistent? (assoc-ref opts 'persistent?)
-                            #:volatile-field? (microvm-volatile? vm))
-        (check-shareable directory))
-      (call-with-launcher opts vm
-        (lambda (launcher)
-          (exit (run-launcher launcher directory command
-                              (launcher-flags opts))))))))
+    (let ((vm (project-microvm project contents
+                               #:vm (assoc-ref opts 'vm)
+                               #:ports (reverse
+                                        (filter-map (match-lambda
+                                                      (('port . port) port)
+                                                      (_ #f))
+                                                    opts)))))
+      (check vm directory)
+      (call-with-launcher opts vm (cut proc directory <> <>)))))
 
-(define (find-running-vm name)
+(define (call-with-vm-launcher vm proc)
+  "Call PROC with the launcher of the running VM."
+  (let ((launcher (running-vm-launcher vm)))
+    (with-store store
+      (add-temp-root store launcher)
+      (proc launcher))))
+
+(define (run-launcher launcher args)
+  (wait-for-exit (spawn launcher (cons launcher args))))
+
+(define (project-vm vms)
+  "Return the microvm among VMS that shares the current project, or #f."
+  (let ((directory (current-project)))
+    (find (compose (cut string=? directory <>) running-vm-directory) vms)))
+
+(define* (find-running-vm #:optional name)
   "Return the running microvm named NAME, or with the ID NAME.  If several
-run, return the one sharing the current project."
-  (match (filter (lambda (vm)
-                   (member name (list (running-vm-name vm)
-                                      (running-vm-id vm))))
-                 (running-vms))
-    (() (leave (G_ "no microvm '~a' is running~%") name))
-    ((vm) vm)
-    (vms
-     (let ((directory (canonicalize-path (or (project-directory) (getcwd)))))
-       (or (find (compose (cut string=? directory <>) running-vm-directory)
-                 vms)
-           (leave (G_ "several microvms '~a' are running, none sharing \
+run, or without NAME, return the one sharing the current project."
+  (if name
+      (match (filter (lambda (vm)
+                       (member name (list (running-vm-name vm)
+                                          (running-vm-id vm))))
+                     (running-vms))
+        (() (leave (G_ "no microvm '~a' is running~%") name))
+        ((vm) vm)
+        (vms
+         (or (project-vm vms)
+             (leave (G_ "several microvms '~a' are running, none sharing \
 '~a'~%")
-                  name directory))))))
+                    name (current-project)))))
+      (or (project-vm (running-vms))
+          (leave (G_ "no microvm runs on '~a'~%") (current-project)))))
+
+;; Options that a running microvm can no longer follow.
+(define %start-options
+  '(vm port stateless? volatile? persistent? merge? discard? allow? dry-run?))
+
+(define (start-microvm opts command)
+  (call-with-project-launcher opts
+    (lambda (directory launcher root)
+      (exit (run-launcher launcher
+                          `(,(string-append "--gc-root=" root)
+                            ,@(launcher-flags opts) ,directory "--"
+                            ,@command))))
+    ;; Fail before building the launcher, which checks it too.
+    #:check (lambda (vm directory)
+              (unless (volatile-vm? #:stateless?
+                                    (or (assoc-ref opts 'stateless?)
+                                        (microvm-stateless? vm))
+                                    #:volatile? (assoc-ref opts 'volatile?)
+                                    #:persistent? (assoc-ref opts 'persistent?)
+                                    #:volatile-field? (microvm-volatile? vm))
+                (check-shareable directory)))))
+
+(define (run-in-microvm args)
+  "Run the command in ARGS in the project's microvm, starting it unless it
+runs, and exit with its status."
+  (let ((opts command (parse-arguments args)))
+    (match (and (not (any (cut assoc-ref opts <>) %start-options))
+                (project-vm (remove running-vm-volatile? (running-vms))))
+      (#f (start-microvm opts command))
+      (vm
+       (info (G_ "~a runs on the project; attaching~%") (running-vm-name vm))
+       (exit (attach-vm! vm #:command command
+                         #:terminal? (isatty? (current-input-port))))))))
+
+(define (attach-command args)
+  (match args
+    ((or () (_))
+     (exit (attach-vm! (apply find-running-vm args)
+                       #:terminal? (isatty? (current-input-port)))))
+    (_ (leave (G_ "usage: guix microvm attach [NAME]~%")))))
+
+(define (kill-command args)
+  "Kill the microvm ARGS name, then resolve its changes if its login shell
+exited."
+  (let ((flags names (partition (cut member <> '("--merge" "--discard"))
+                                args)))
+    (match (list flags names)
+      (((or () (_)) (or () (_)))
+       (let ((vm (apply find-running-vm names)))
+         (if (running-vm-detached? vm)
+             (call-with-vm-launcher vm
+               (lambda (launcher)
+                 (kill-vm! vm)
+                 (exit (run-launcher
+                        launcher
+                        `("--resolve"
+                          ,(string-append "--name=" (running-vm-name vm))
+                          ,@flags ,(running-vm-directory vm))))))
+             (kill-vm! vm))))
+      (_
+       (leave (G_ "usage: guix microvm kill [--merge|--discard] [NAME]~%"))))))
+
+(define (resolve-command args)
+  "Resolve the changes left on the project as ARGS say."
+  (let ((opts command (parse-arguments args)))
+    (unless (null? command)
+      (leave (G_ "usage: guix microvm resolve [--merge|--discard]~%")))
+    (and=> (project-vm (remove running-vm-volatile? (running-vms)))
+           (lambda (vm)
+             (leave (G_ "~a still runs on '~a'~%")
+                    (running-vm-name vm) (running-vm-directory vm))))
+    (call-with-project-launcher opts
+      (lambda (directory launcher root)
+        (exit (run-launcher
+               launcher
+               `("--resolve" ,(string-append "--gc-root=" root)
+                 ,@(filter (cut member <> '("--merge" "--discard"))
+                           (launcher-flags opts))
+                 ,directory)))))))
+
+(define (diff-command args)
+  "Show the changes left on the project to the files in ARGS."
+  (let* ((cwd (canonicalize-path (getcwd)))
+         (arguments (match args
+                      (((? (cut string-prefix? "--tool=" <>) tool) files ...)
+                       `(,tool ,cwd ,@files))
+                      (files `(,cwd ,@files)))))
+    (match (find (lambda (vm)
+                   (contains-file? (running-vm-directory vm) cwd))
+                 (running-vms))
+      (#f
+       (call-with-project-launcher %default-options
+         (lambda (directory launcher root)
+           (exit (run-launcher launcher
+                               `("--diff" ,(string-append "--gc-root=" root)
+                                 ,@arguments))))))
+      (vm
+       (call-with-vm-launcher vm
+         (lambda (launcher)
+           (exit (run-launcher launcher `("--diff" ,@arguments)))))))))
 
 (define (control-usb args)
   "Attach or detach a host USB device as ARGS say."
@@ -461,87 +363,53 @@ run, return the one sharing the current project."
      (leave (G_ "usage: guix microvm usb attach|detach NAME \
 VENDOR[:PRODUCT]~%")))))
 
-(define (list-vms)
-  (for-each (lambda (vm)
-              (format #t "~a\t~a\t~a~%"
-                      (running-vm-name vm) (running-vm-id vm)
-                      (running-vm-directory vm)))
-            (running-vms)))
+(define (duration seconds)
+  (cond ((< seconds 60) (format #f "~as" seconds))
+        ((< seconds 3600) (format #f "~am" (quotient seconds 60)))
+        ((< seconds 86400) (format #f "~ah" (quotient seconds 3600)))
+        (else (format #f "~ad" (quotient seconds 86400)))))
 
-(define (normalize-file-name file)
-  (string-append
-   "/"
-   (string-join (reverse
-                 (fold (lambda (part result)
-                         (match part
-                           ((or "" ".") result)
-                           (".." (if (pair? result) (cdr result) result))
-                           (_ (cons part result))))
-                       '()
-                       (string-split file #\/)))
-                "/")))
+(define (vm-state vm)
+  (string-append (if (running-vm-detached? vm) "detached" "running")
+                 (if (running-vm-changed? vm) ", changed" "")))
 
-(define (file-in-project project file)
-  (let ((file (normalize-file-name
-               (if (absolute-file-name? file)
-                   file
-                   (string-append (canonicalize-path (getcwd)) "/" file)))))
-    (cond ((string=? file project) "")
-          ((string-prefix? (string-append project "/") file)
-           (string-drop file (+ 1 (string-length project))))
-          (else (leave (G_ "~a: not in the project ~a~%") file project)))))
+(define (vm-fields vm now)
+  `((name ,(running-vm-name vm))
+    (id ,(running-vm-id vm))
+    (up ,(duration (- now (running-vm-started vm))))
+    (state ,(vm-state vm))
+    (directory ,(running-vm-directory vm))))
 
-(define (selected-changes changes files)
-  (if (null? files)
-      changes
-      (filter (lambda (change)
-                (any (lambda (selected)
-                       (or (string-null? selected)
-                           (contains-file? selected (change-file change))))
-                     files))
-              changes)))
+(define (list-table vms)
+  (let* ((now (current-time))
+         (rows (cons '("NAME" "ID" "UP" "STATE" "PROJECT")
+                     (map (lambda (vm)
+                            (map cadr (vm-fields vm now)))
+                          vms)))
+         (widths (apply map (lambda column
+                              (apply max (map string-length column)))
+                        rows)))
+    (for-each (lambda (row)
+                (display (string-trim-right
+                          (string-join (map (lambda (cell width)
+                                              (string-pad-right cell width))
+                                            row widths)
+                                       "  ")))
+                (newline))
+              rows)))
 
-(define (current-layer)
-  "Return the layer over the project that contains the current directory."
-  (let ((directory (canonicalize-path (getcwd))))
-    (match (layers-around (data-directory) directory)
-      (() (leave (G_ "no microvm runs on a project containing ~a~%")
-                 directory))
-      ((layer) layer)
-      (_ (leave (G_ "several microvms left changes to projects containing \
-~a~%")
-                directory)))))
+(define (list-sexps vms)
+  (let ((now (current-time)))
+    (for-each (lambda (vm)
+                (write `(vm ,@(vm-fields vm now)))
+                (newline))
+              vms)))
 
-(define (show-diff args)
-  "Show the changes of the microvm on the project to the files in ARGS, with
-'git diff' or the tool ARGS name."
-  (unless (search-path (parse-path (getenv "PATH")) "git")
-    (leave (G_ "'guix microvm diff' needs git~%")))
-  (let* ((tool files (match args
-                       (((? (cut string-prefix? "--tool=" <>) option)
-                         files ...)
-                        (values (string-drop option
-                                             (string-length "--tool="))
-                                files))
-                       (_ (values #f args))))
-         (layer (current-layer))
-         (project (layer-project layer))
-         (groups (classify-changes layer #:git "git"))
-         (changes (selected-changes
-                   (append (assq-ref groups 'mergeable)
-                           (assq-ref groups 'protected))
-                   (map (cut file-in-project project <>) files))))
-    (parameterize ((%program-name "guix microvm"))
-      (report-skipped groups))
-    (if (null? changes)
-        (display (G_ "no changes\n"))
-        (call-with-diff-trees layer changes
-          (lambda (old new)
-            (let ((status (wait-for-exit
-                           (git-diff-process "git" tool old new))))
-              (unless (<= status (if tool 0 1))
-                (leave (G_ "~a exited with status ~a~%")
-                       (or tool "git diff") status))))))))
+(define (list-command args)
+  (match args
+    (() (list-table (running-vms)))
+    (("--format=sexp") (list-sexps (running-vms)))
+    (_ (leave (G_ "usage: guix microvm list [--format=sexp]~%")))))
 
 (define-command (guix-microvm . args)
   (category development)
@@ -549,9 +417,10 @@ VENDOR[:PRODUCT]~%")))))
 
   (with-error-handling
     (match args
-      (("list") (list-vms))
-      (("attach" name) (exit (attach-vm! (find-running-vm name))))
-      (("kill" name) (kill-vm! (find-running-vm name)))
+      (("list" rest ...) (list-command rest))
+      (("attach" rest ...) (attach-command rest))
+      (("kill" rest ...) (kill-command rest))
+      (("resolve" rest ...) (resolve-command rest))
       (("usb" rest ...) (control-usb rest))
-      (("diff" rest ...) (show-diff rest))
+      (("diff" rest ...) (diff-command rest))
       (_ (run-in-microvm args)))))

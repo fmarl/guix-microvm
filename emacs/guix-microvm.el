@@ -17,15 +17,18 @@
 ;; changes between merged and skipped.
 ;;
 ;; `guix-microvm-list' lists the running microvms to open their /work with
-;; TRAMP or to kill them.
+;; TRAMP or a shell in it, or to kill them.  `guix-microvm-resolve' resolves
+;; the changes they left on a project.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'comint)
 (require 'diff)
 (require 'diff-mode)
 (require 'seq)
 (require 'server)
+(require 'shell)
 
 (defvar-local guix-microvm-trees nil
   "Directory with the files of the selection in project/ and vm/.
@@ -295,12 +298,19 @@ Return its output, or signal an error with what it reported."
       (delete-file error-file))))
 
 (defun guix-microvm--running ()
-  "Return the running microvms as lists of their name, ID and directory."
-  (mapcan (lambda (line)
-            (pcase (split-string line "\t")
-              (`(,name ,id . ,directory)
-               (list (list name id (string-join directory "\t"))))))
-          (split-string (guix-microvm--output "list") "\n" t)))
+  "Return the running microvms as lists of their name, ID, directory, uptime
+and state."
+  (with-temp-buffer
+    (insert (guix-microvm--output "list" "--format=sexp"))
+    (goto-char (point-min))
+    (let ((vms nil))
+      (while (progn (skip-chars-forward " \t\n") (not (eobp)))
+        (pcase (read (current-buffer))
+          (`(vm . ,fields)
+           (push (mapcar (lambda (key) (cadr (assq key fields)))
+                         '(name id directory up state))
+                 vms))))
+      (nreverse vms))))
 
 (defun guix-microvm-tramp-file (id)
   "Return the name of /work in the running microvm ID."
@@ -308,7 +318,7 @@ Return its output, or signal an error with what it reported."
 
 (defun guix-microvm-tramp--hosts (_file)
   "Return the running microvms for completing TRAMP file names."
-  (mapcar (pcase-lambda (`(,_ ,id ,_)) (list nil id))
+  (mapcar (pcase-lambda (`(,_ ,id . ,_)) (list nil id))
           (ignore-errors (guix-microvm--running))))
 
 (defvar tramp-methods)
@@ -349,25 +359,79 @@ Return its output, or signal an error with what it reported."
                              (mapcar (lambda (vm) (length (nth n vm))) vms))
                       t)))
       (setq tabulated-list-format
-            (vector (width "Name" 0) (width "ID" 1) '("Project" 0 t))))
+            (vector (width "Name" 0) (width "ID" 1) (width "Up" 3)
+                    (width "State" 4) '("Project" 0 t))))
     (setq tabulated-list-entries
-          (mapcar (lambda (vm) (list vm (apply #'vector vm))) vms))
+          (mapcar (pcase-lambda ((and vm `(,name ,id ,directory ,up ,state)))
+                    (list vm (vector name id up state directory)))
+                  vms))
     (tabulated-list-init-header)))
 
+(defun guix-microvm--environment ()
+  "Return `process-environment' for asking in a buffer."
+  (let ((client (expand-file-name "emacsclient" invocation-directory)))
+    (append '("PAGER=cat" "GIT_PAGER=cat")
+            (and (server-running-p)
+                 (file-executable-p client)
+                 (list (concat "VISUAL=" client)))
+            process-environment)))
+
+(defun guix-microvm--start (name arguments directory finish)
+  "Run `guix-microvm-command' with ARGUMENTS in DIRECTORY, in a buffer NAME.
+Show the buffer once it prints something, and kill it if the command
+succeeds silently.  Call FINISH when it exits.  Return the process."
+  (let* ((default-directory directory)
+         (process-environment (guix-microvm--environment))
+         (process (get-buffer-process
+                   (apply #'make-comint-in-buffer "guix-microvm"
+                          (generate-new-buffer name)
+                          (car guix-microvm-command) nil
+                          (append (cdr guix-microvm-command) arguments)))))
+    (add-function :after (process-filter process)
+                  (lambda (process _output)
+                    (process-put process 'guix-microvm-output t)
+                    (display-buffer (process-buffer process))))
+    (set-process-sentinel
+     process
+     (lambda (process _event)
+       (unless (process-live-p process)
+         (let ((buffer (process-buffer process)))
+           (when (buffer-live-p buffer)
+             (if (and (zerop (process-exit-status process))
+                      (not (process-get process 'guix-microvm-output)))
+                 (kill-buffer buffer)
+               (display-buffer buffer))))
+         (funcall finish))))
+    process))
+
+(defun guix-microvm-list--kill (vm)
+  "Kill VM in a buffer of its own and return the process."
+  (pcase-let ((`(,_ ,id . ,_) vm))
+    (guix-microvm--start (format "*guix-microvm kill %s*" id)
+                         (list "kill" id) (expand-file-name "~/")
+                         (lambda ()
+                           (when (featurep 'tramp)
+                             (tramp-cleanup-connection
+                              (tramp-dissect-file-name
+                               (guix-microvm-tramp-file id))))
+                           (when-let* ((list (get-buffer "*Microvms*")))
+                             (with-current-buffer list
+                               (revert-buffer)))))))
+
+;;;###autoload
+(defun guix-microvm-resolve (directory)
+  "Resolve the changes that microvms left on the project in DIRECTORY."
+  (interactive (list (read-directory-name "Project: " nil nil t)))
+  (when (file-remote-p directory)
+    (user-error "%s is not on this host" directory))
+  (guix-microvm--start (format "*guix-microvm resolve %s*"
+                               (abbreviate-file-name directory))
+                       '("resolve") (file-name-as-directory directory)
+                       #'ignore))
+
 (defun guix-microvm-list--kill-all (vms)
-  "Kill VMS, report those that failed, and refresh the list."
-  (let ((failures nil))
-    (pcase-dolist (`(,_ ,id ,_) vms)
-      (condition-case error
-          (progn
-            (guix-microvm--output "kill" id)
-            (when (featurep 'tramp)
-              (tramp-cleanup-connection
-               (tramp-dissect-file-name (guix-microvm-tramp-file id)))))
-        (error (push (error-message-string error) failures))))
-    (revert-buffer)
-    (when failures
-      (message "%s" (string-join (nreverse failures) "\n")))))
+  "Kill VMS."
+  (mapcar #'guix-microvm-list--kill vms))
 
 (defun guix-microvm-list-mark ()
   "Mark the microvm at point to be killed.
@@ -395,7 +459,7 @@ ones."
       (user-error "No microvm marked; %s marks one"
                   (substitute-command-keys "\\[guix-microvm-list-mark]")))
     (when (y-or-n-p (pcase marked
-                      (`((,name ,_ ,directory))
+                      (`((,name ,_ ,directory . ,_))
                        (format "Kill %s in %s? "
                                name (abbreviate-file-name directory)))
                       (_ (format "Kill %d microvms? " (length marked)))))
@@ -413,11 +477,21 @@ ones."
 (defun guix-microvm-list-dired ()
   "Open /work of the microvm at point in Dired."
   (interactive nil guix-microvm-list-mode)
-  (pcase-let ((`(,_ ,id ,_) (guix-microvm-list--vm-at-point)))
+  (pcase-let ((`(,_ ,id . ,_) (guix-microvm-list--vm-at-point)))
     (dired (guix-microvm-tramp-file id))))
+
+(defun guix-microvm-list-shell ()
+  "Open a login shell in /work of the microvm at point."
+  (interactive nil guix-microvm-list-mode)
+  (pcase-let ((`(,name ,id . ,_) (guix-microvm-list--vm-at-point)))
+    (let ((default-directory (guix-microvm-tramp-file id))
+          (explicit-shell-file-name "bash")
+          (explicit-bash-args '("--noediting" "-i" "-l")))
+      (shell (format "*shell %s*" name)))))
 
 (defvar-keymap guix-microvm-list-mode-map
   "RET" #'guix-microvm-list-dired
+  "s" #'guix-microvm-list-shell
   "d" #'guix-microvm-list-mark
   "u" #'guix-microvm-list-unmark
   "x" #'guix-microvm-list-execute
@@ -425,7 +499,8 @@ ones."
 
 (define-derived-mode guix-microvm-list-mode tabulated-list-mode "Microvms"
   "Major mode for the list of running microvms.
-A microvm killed here asks about its changes in the terminal it runs in.
+A microvm whose login shell exited asks about its changes in a buffer,
+others in their terminal.
 
 \\{guix-microvm-list-mode-map}"
   (setq tabulated-list-padding 2)

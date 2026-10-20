@@ -5,13 +5,17 @@
   #:use-module (guix build utils)
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-1)
   #:use-module (guix-microvm build error)
   #:use-module (guix-microvm build process)
   #:export (shell-quote
             ssh-key-blob
-            write-known-hosts
+            write-known-hosts!
             ssh-options
             ssh-spawner
+            read-secrets
+            environment-with
+            vm-ssh-spawner
             spawn-batch-ssh
             ssh-succeeds?
             ssh-output
@@ -35,7 +39,7 @@ missing."
 
 (define %host-key-alias "guix-microvm")
 
-(define (write-known-hosts file host-key-blob)
+(define (write-known-hosts! file host-key-blob)
   (call-with-output-file file
     (lambda (port)
       (format port "~a ssh-ed25519 ~a~%" %host-key-alias host-key-blob))))
@@ -116,3 +120,38 @@ from VM NAME to the host, or empty lists without WAYPIPE."
               (list "-o" "ExitOnForwardFailure=yes"
                     "-R" (string-append guest-socket ":" socket)))
       (values '() '() '())))
+
+(define (read-secrets directory names)
+  "Return the existing files NAMES in DIRECTORY as an alist of names and
+contents."
+  (filter-map (lambda (name)
+                (let ((file (string-append directory "/" name)))
+                  (and (file-exists? file)
+                       (cons name
+                             (string-trim-right
+                              (call-with-input-file file get-string-all))))))
+              names))
+
+(define (environment-with variables)
+  "Return (environ) with VARIABLES, an alist of names and values, set."
+  (define (entry-name entry)
+    (string-take entry (or (string-index entry #\=) (string-length entry))))
+
+  (append (map (match-lambda
+                 ((name . value) (string-append name "=" value)))
+               variables)
+          (remove (lambda (entry)
+                    (assoc (entry-name entry) variables))
+                  (environ))))
+
+(define (vm-ssh-spawner ssh)
+  "Return a procedure that runs commands in the VM the alist SSH
+describes."
+  (ssh-spawner (assq-ref ssh 'program) (assq-ref ssh 'options)
+               (assq-ref ssh 'destination)
+               #:environment
+               (environment-with
+                (append (assq-ref ssh 'variables)
+                        (match (assq-ref ssh 'secrets)
+                          ((directory . names)
+                           (read-secrets directory names)))))))

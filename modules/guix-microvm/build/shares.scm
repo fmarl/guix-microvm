@@ -10,6 +10,7 @@
   #:use-module (srfi srfi-9)
   #:use-module (guix-microvm build layer)
   #:use-module (guix-microvm build process)
+  #:use-module (guix-microvm build protocol)
   #:export (share
             share-tag
             share-directory
@@ -20,7 +21,7 @@
             share-servers
             share-devices
             virtiofs-device
-            mount-store-items))
+            mount-store-items!))
 
 (define-record-type <share>
   (share tag directory options wrapper)
@@ -48,17 +49,17 @@ HOST-GID in its user namespace."
 #f."
   (let ((owned (id-map-options uid gid 0 0)))
     ;; Store items belong to root, who is unmapped in the namespace.
-    `(,(share "store" store
+    `(,(share %store-tag store
               (cons "--readonly"
                     (id-map-options 0 0 (overflow-id "uid")
                                     (overflow-id "gid")))
               (list mount-store store-items host-key store "--"))
       ,@(if layer
-            (list (share "work" (layer-merged layer) owned
+            (list (share %work-tag (layer-merged layer) owned
                          `(,mount-overlay ,@(layer-overlay-arguments layer)
                            "--")))
             '())
-      ,(share "home" home owned '()))))
+      ,(share %home-tag home owned '()))))
 
 (define (share-socket directory share)
   (socket-file directory (share-tag share)))
@@ -93,10 +94,7 @@ HOST-GID in its user namespace."
                 (virtiofs-device share (share-socket directory share)))
               shares))
 
-;; Same as in (guix-microvm base).
-(define %host-key-name ".guix-microvm-ssh-host-key")
-
-(define (mount-store-items items host-key root)
+(define (mount-store-items! items host-key root)
   "Bind-mount the store items listed in ITEMS on a tmpfs at ROOT, and copy
 HOST-KEY there.  Needs a private mount namespace."
   (mount "none" root "tmpfs" 0 "mode=755")

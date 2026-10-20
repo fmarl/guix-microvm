@@ -183,6 +183,13 @@ offline() {
                    microvm --allow --discard -- sh -c 'exit 10')
 }
 
+# The ID of the VM on DIRECTORY.
+vm_id() {
+    microvm list --format=sexp |
+        grep -F "(directory \"$(cd "$1" && pwd -P)\")" |
+        sed 's/.*(id "\([^"]*\)").*/\1/'
+}
+
 # Start microvm with ARGS in DIRECTORY, in the background, and wait until
 # its command prints "up".
 start_vm() {
@@ -194,7 +201,7 @@ start_vm() {
 }
 
 kill_vm() {
-    (cd "$1" && microvm kill vm)
+    microvm kill "$(vm_id "$1")"
     wait $pid
 }
 
@@ -228,16 +235,70 @@ shell_keeps_running() {
     mkdir shell
     (cd shell &&
          printf 'echo shell > /work/file; exit\n' |
-             script -qfec "$guix microvm --merge" /dev/null) >"$out" 2>&1 &
-    pid=$!
-    i=0
-    until grep -q 'the VM keeps running' "$out" || [ $i -ge 300 ]; do
-        sleep 1
-        i=$((i + 1))
-    done
-    attached=$(cd shell && echo 'cat file' | microvm attach vm 2>&1)
-    kill_vm shell
-    [ "$attached" = shell ] && [ "$(cat shell/file)" = shell ]
+             timeout 300 script -qfec "$guix microvm" /dev/null) >"$out" 2>&1
+    returned=$?
+    grep -q 'runs on' "$out"
+    running=$?
+    microvm list | grep -q '^shell-vm .* detached, changed '
+    listed=$?
+    attached=$(cd shell && echo 'cat file' | microvm attach 2>&1)
+    command=$(cd shell && microvm -- cat file 2>/dev/null)
+    (cd shell && microvm kill --merge) </dev/null >>"$out" 2>&1
+    killed=$?
+    [ $returned -eq 0 ] && [ $running -eq 0 ] && [ $listed -eq 0 ] &&
+        [ "$attached" = shell ] && [ "$command" = shell ] &&
+        [ $killed -eq 0 ] && [ "$(cat shell/file)" = shell ]
+}
+
+kill_keeps_changes() {
+    mkdir kept-shell
+    (cd kept-shell &&
+         printf 'echo kept > /work/file; exit\n' |
+             timeout 300 script -qfec "$guix microvm" /dev/null) >"$out" 2>&1
+    microvm kill "$(vm_id kept-shell)" </dev/null >>"$out" 2>&1
+    killed=$?
+    grep -q 'kept the changes' "$out"
+    kept=$?
+    (cd kept-shell && status_is 1 microvm --discard -- true)
+    refused=$?
+    (cd kept-shell && microvm diff) >"$out" 2>&1
+    grep -q '^+kept' "$out"
+    diffed=$?
+    (cd kept-shell && status_is 0 microvm resolve --discard)
+    resolved=$?
+    (cd kept-shell && status_is 0 microvm --discard -- true)
+    started=$?
+    [ $killed -eq 0 ] && [ $kept -eq 0 ] && [ $refused -eq 0 ] &&
+        [ $diffed -eq 0 ] && [ $resolved -eq 0 ] && [ $started -eq 0 ] &&
+        test ! -e kept-shell/file
+}
+
+# Two projects of one name.
+named_vms() {
+    mkdir -p one/named two/named
+    start_vm one/named --discard -- sh -c '
+      cat /proc/sys/kernel/hostname; echo up; exec sleep 300'
+    up=$?
+    (cd two/named && microvm --discard -- sh -c '
+       cat /proc/sys/kernel/hostname && grep -q " named-vm-2$" /etc/hosts') \
+        >named.out 2>&1
+    second=$?
+    kill_vm one/named
+    [ $up -eq 0 ] && grep -q '^named-vm[[:space:]]*$' "$out" &&
+        [ $second -eq 0 ] && grep -q '^named-vm-2[[:space:]]*$' named.out
+}
+
+volatile_vm_leaves_the_project() {
+    mkdir volatile-shell
+    (cd volatile-shell &&
+         printf 'exit\n' |
+             timeout 300 script -qfec "$guix microvm --volatile" /dev/null) \
+        >"$out" 2>&1
+    (cd volatile-shell && status_is 0 microvm resolve --discard)
+    resolved=$?
+    microvm kill "$(vm_id volatile-shell)" </dev/null >>"$out" 2>&1
+    killed=$?
+    [ $resolved -eq 0 ] && [ $killed -eq 0 ]
 }
 
 piped_shell_exits() {
@@ -365,9 +426,13 @@ check "protected files change only in the layer" protected_files
 check "no network" offline
 check "one VM per project" second_vm
 check "diff shows the changes" diff_shows_changes
-check "a shell's VM runs until it is killed, and can be attached" \
+check "a shell's VM runs in the background until it is killed" \
       shell_keeps_running
+check "without a terminal, kill keeps the changes for diff and resolve" \
+      kill_keeps_changes
 check "a shell without a terminal ends its VM" piped_shell_exits
+check "a volatile VM leaves the project alone" volatile_vm_leaves_the_project
+check "VMs are named after their project" named_vms
 
 if can_snapshot; then
     check "the VM sees a snapshot" snapshot

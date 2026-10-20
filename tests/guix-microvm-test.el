@@ -145,25 +145,36 @@ guix-microvm-trees: %S; guix-microvm-project: %S -*-\n# Help.\n"
       (should-not (buffer-live-p buffer)))))
 
 (defmacro guix-microvm-test-with-list (vms &rest body)
-  "Run BODY in the list of the running VMS, names, IDs and directories.
-Each `guix microvm kill' adds its argument to the file kills."
+  "Run BODY in the list of the running VMS: names, IDs, directories and
+optionally states.  Each `guix microvm kill' adds its argument to the file
+kills, and `guix microvm resolve' its directory to resolves."
   (declare (indent 1))
   `(let* ((directory (make-temp-file "guix-microvm-test" t))
           (script (expand-file-name "guix" directory))
           (kills (expand-file-name "kills" directory))
+          (resolves (expand-file-name "resolves" directory))
           (guix-microvm-command (list script "microvm")))
      (unwind-protect
          (progn
            (with-temp-file (expand-file-name "list" directory)
-             (dolist (vm ,vms)
-               (insert (string-join vm "\t") "\n")))
+             (pcase-dolist (`(,name ,id ,vm-directory ,state) ,vms)
+               (prin1 `(vm (name ,name) (id ,id) (up "5m")
+                           (state ,(or state "running"))
+                           (directory ,vm-directory))
+                      (current-buffer))
+               (insert "\n")))
            (with-temp-file script
              (insert "#!/bin/sh\n"
                      "case $2 in\n"
                      "list) cat " (expand-file-name "list" directory) ";;\n"
+                     "resolve) pwd >> " resolves ";;\n"
                      "kill) if [ \"$3\" = gone ]; then\n"
                      "        echo \"no microvm 'gone' is running\" >&2\n"
                      "        exit 1\n"
+                     "      fi\n"
+                     "      if [ \"$3\" = asks ]; then\n"
+                     "        echo 'merge?'\n"
+                     "        exec sleep 30\n"
                      "      fi\n"
                      "      echo \"$3\" >> " kills ";;\n"
                      "esac\n"))
@@ -171,9 +182,23 @@ Each `guix microvm kill' adds its argument to the file kills."
            (cl-letf (((symbol-function 'pop-to-buffer-same-window) #'ignore))
              (guix-microvm-list))
            (with-current-buffer "*Microvms*" ,@body))
+       (guix-microvm-test-wait-for-kills)
+       (dolist (buffer (buffer-list))
+         (when (string-prefix-p "*guix-microvm " (buffer-name buffer))
+           (kill-buffer buffer)))
        (when (get-buffer "*Microvms*")
          (kill-buffer "*Microvms*"))
        (delete-directory directory t))))
+
+(defun guix-microvm-test-wait-for-kills ()
+  "Wait until no `guix microvm kill' or `resolve' runs."
+  (while (seq-some (lambda (process)
+                     (and (string-prefix-p "guix-microvm"
+                                           (process-name process))
+                          (process-live-p process)))
+                   (process-list))
+    (accept-process-output nil 0.05))
+  (accept-process-output nil 0.05))
 
 (defun guix-microvm-test-lines (file)
   "Return the lines of FILE, or nil if it is missing."
@@ -183,12 +208,18 @@ Each `guix microvm kill' adds its argument to the file kills."
          (split-string (buffer-string) "\n" t))))
 
 (ert-deftest guix-microvm-list-shows-the-running-vms ()
-  (guix-microvm-test-with-list '(("b" "B1" "/tmp") ("a" "A1" "/a\tb"))
-    (should (equal (mapcar #'car tabulated-list-entries)
+  (guix-microvm-test-with-list '(("b" "B1" "/tmp")
+                                 ("a" "A1" "/a\tb" "detached, changed"))
+    (should (equal (mapcar (lambda (entry) (seq-take (car entry) 3))
+                           tabulated-list-entries)
                    '(("a" "A1" "/a\tb") ("b" "B1" "/tmp"))))
     (goto-char (point-min))
-    (should (equal (tabulated-list-get-id) '("a" "A1" "/a\tb")))
-    (should (string-match-p "^  b +B1 +/tmp$" (buffer-string)))))
+    (should (equal (seq-take (tabulated-list-get-id) 3)
+                   '("a" "A1" "/a\tb")))
+    (should (string-match-p "^  a +A1 +5m +detached, changed +/a"
+                            (buffer-string)))
+    (should (string-match-p "^  b +B1 +5m +running +/tmp$"
+                            (buffer-string)))))
 
 (ert-deftest guix-microvm-list-mark-and-execute ()
   (guix-microvm-test-with-list '(("a" "A1" "/") ("b" "B1" "/") ("c" "C1" "/"))
@@ -201,7 +232,9 @@ Each `guix microvm kill' adds its argument to the file kills."
     (cl-letf (((symbol-function 'y-or-n-p)
                (lambda (prompt) (should (equal prompt "Kill 2 microvms? ")) t)))
       (guix-microvm-list-execute))
-    (should (equal (guix-microvm-test-lines kills) '("A1" "B1")))))
+    (guix-microvm-test-wait-for-kills)
+    (should (equal (sort (guix-microvm-test-lines kills) #'string<)
+                   '("A1" "B1")))))
 
 (ert-deftest guix-microvm-list-execute-asks ()
   (guix-microvm-test-with-list '(("a" "A1" "/"))
@@ -223,7 +256,9 @@ Each `guix microvm kill' adds its argument to the file kills."
     (forward-line)
     (let ((id (cadr (tabulated-list-get-id))))
       (guix-microvm-list-kill)
-      (should (equal (guix-microvm-test-lines kills) (list id))))
+      (guix-microvm-test-wait-for-kills)
+      (should (equal (guix-microvm-test-lines kills) (list id)))
+      (should-not (get-buffer (format "*guix-microvm kill %s*" id))))
     (should (= (length tabulated-list-entries) 2))))
 
 (ert-deftest guix-microvm-list-kill-reports-failures ()
@@ -231,18 +266,52 @@ Each `guix microvm kill' adds its argument to the file kills."
     (goto-char (point-min))
     (guix-microvm-list-mark)
     (guix-microvm-list-mark)
-    (let ((messages nil))
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
-                ((symbol-function 'message)
-                 (lambda (&rest args) (push (apply #'format args) messages))))
-        (guix-microvm-list-execute))
-      (should (equal (guix-microvm-test-lines kills) '("B1")))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+      (guix-microvm-list-execute))
+    (guix-microvm-test-wait-for-kills)
+    (should (equal (guix-microvm-test-lines kills) '("B1")))
+    (should-not (get-buffer "*guix-microvm kill B1*"))
+    (with-current-buffer "*guix-microvm kill gone*"
       (should (string-match-p "no microvm 'gone' is running"
-                              (car messages))))))
+                              (buffer-string))))))
+
+(ert-deftest guix-microvm-list-kill-buffer-killed-while-asking ()
+  (guix-microvm-test-with-list '(("a" "asks" "/"))
+    (guix-microvm-list-kill)
+    (let ((buffer (get-buffer "*guix-microvm kill asks*")))
+      (with-current-buffer buffer
+        (while (not (string-match-p "merge\\?" (buffer-string)))
+          (accept-process-output nil 0.05)))
+      (setq tabulated-list-entries nil)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer)))
+    (guix-microvm-test-wait-for-kills)
+    (should tabulated-list-entries)))
 
 (ert-deftest guix-microvm-list-kill-without-a-vm ()
   (guix-microvm-test-with-list '()
     (should-error (guix-microvm-list-kill) :type 'user-error)))
+
+(ert-deftest guix-microvm-list-shell ()
+  (guix-microvm-test-with-list '(("a" "A1" "/"))
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'shell)
+                 (lambda (buffer)
+                   (setq opened (list buffer default-directory
+                                      explicit-shell-file-name)))))
+        (guix-microvm-list-shell))
+      (should (equal opened '("*shell a*" "/microvm:A1:/work/" "bash"))))))
+
+(ert-deftest guix-microvm-resolve-runs-in-the-project ()
+  (guix-microvm-test-with-list '()
+    (let ((project (file-truename (make-temp-file "guix-microvm-project" t))))
+      (unwind-protect
+          (progn
+            (guix-microvm-resolve project)
+            (guix-microvm-test-wait-for-kills)
+            (should (equal (guix-microvm-test-lines resolves)
+                           (list (directory-file-name project)))))
+        (delete-directory project t)))))
 
 (ert-deftest guix-microvm-list-dired ()
   (guix-microvm-test-with-list '(("a" "A1" "/"))

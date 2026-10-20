@@ -26,8 +26,8 @@
             problem-detail
             plan-merge
             plan-problems
-            apply-plan
-            forget-merged))
+            apply-plan!
+            forget-merged!))
 
 (define %protected-names
   '(".envrc" ".dir-locals.el" ".dir-locals-2.el" ".vscode" ".idea"))
@@ -265,7 +265,7 @@ SOURCE.  A directory stays writable until 'restore-permissions'."
                            (_ #f))
                          actions))))
 
-(define (apply-plan layer plan)
+(define (apply-plan! layer plan)
   "Apply PLAN to the project of LAYER and return the problems of the files
 it could not change."
   (define project
@@ -303,7 +303,7 @@ it could not change."
     (restore-permissions layer applied)
     (filter-map cdr results)))
 
-(define (forget-merged layer plan failures)
+(define (forget-merged! layer plan failures)
   "Remove from LAYER what PLAN merged, but for the files of FAILURES, so
 that the next run only offers these."
   (let ((failed (map problem-file failures)))

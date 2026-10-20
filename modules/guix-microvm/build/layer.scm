@@ -24,9 +24,9 @@
             layer-file
             upper-file
             layer-overlay-arguments
-            create-layer
+            create-layer!
             open-layer
-            delete-layer
+            delete-layer!
             host-unchanged?
             base-type
             base-contents
@@ -34,7 +34,7 @@
             same-entry?
             host-file
             overlay-options
-            mount-overlay
+            mount-overlay!
             change?
             change-file
             change-kind
@@ -129,9 +129,9 @@ shared with ~a
               (tree-entries directory))
          <>)))
 
-(define* (create-layer data project #:key cp)
+(define* (create-layer! data project #:key cp)
   "Create a layer over PROJECT in DATA and return it.  It stays until
-'delete-layer'."
+'delete-layer!'."
   (let ((root (begin
                 (mkdir-p (string-append data "/layers"))
                 (mkdtemp (string-append data "/layers/XXXXXX")))))
@@ -166,7 +166,7 @@ extended attributes; tmpfs needs CONFIG_TMPFS_XATTR" data))
                           (alist->hash-table
                            (call-with-input-file manifest read)))))))
 
-(define (delete-layer layer)
+(define (delete-layer! layer)
   (delete-tree (layer-directory layer)))
 
 (define (unchanged? file stat other other-stat)
@@ -248,7 +248,7 @@ the layer has no snapshot."
                  ;; user.overlay.* attributes.
                  ",userxattr"))
 
-(define (mount-overlay lower upper work merged)
+(define (mount-overlay! lower upper work merged)
   (mount "overlay" merged "overlay" 0 (overlay-options lower upper work)))
 
 (define-record-type <change>

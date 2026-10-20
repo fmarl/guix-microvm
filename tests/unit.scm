@@ -4,10 +4,13 @@
 (use-modules (guix-microvm build error)
              (guix-microvm build files)
              (guix-microvm build git)
+             (guix-microvm build invocation)
              (guix-microvm build layer)
              (guix-microvm build merge)
              (guix-microvm build microvm)
              (guix-microvm build process)
+             (guix-microvm build qemu)
+             (guix-microvm build registry)
              (guix-microvm build shares)
              (guix-microvm build review)
              (guix-microvm build ssh)
@@ -15,9 +18,12 @@
              (guix-microvm base)
              (guix-microvm control)
              (guix-microvm microvm)
+             (guix-microvm project)
              (gnu services)
              ((gnu services base) #:select (static-networking))
              ((gnu system) #:select (operating-system))
+             ((guix-cage build locked grants)
+              #:select (file-access-file file-access-permissions))
              ((guix build utils)
               #:select (mkdir-p delete-file-recursively find-files))
              ((guix diagnostics)
@@ -40,19 +46,20 @@
 (define-syntax-rule (define-private module name ...)
   (begin (define name (@@ module name)) ...))
 
+(define-private (guix-microvm build locked-rules)
+  qemu-accesses waypipe-client-accesses)
+
+(define-private (guix-microvm build invocation)
+  getenv-positive-integer)
+
 (define-private (guix-microvm build microvm)
-  parse-arguments existing-directory getenv-positive-integer parse-invocation
-  invocation-directory invocation-command invocation-stateless?
-  invocation-volatile? invocation-memory invocation-cpus vm-files
-  read-secrets environment-with serial-options
-  qemu-arguments vm-kernel-arguments open-log call-with-temporary-directory
-  printable)
+  vm-files open-log printable)
 
 (define-private (guix-microvm build layer)
   make-layer make-change user-xattrs?)
 
 (define-private (guix-microvm build review)
-  read-selection merge-changes)
+  read-selection merge-changes selected-changes)
 
 (define-private (guix-microvm microvm)
   passt-port-options passt-network-options microvm-network-options
@@ -60,24 +67,30 @@
   guest-configuration)
 
 (define-private (guix-microvm control)
-  usb-id-matches? usb-host-arguments running-vm running-vm-ssh)
+  usb-id-matches? usb-host-arguments running-vm-ssh)
 
 (define-private (guix extensions microvm)
-  string->forwarded-port launcher-flags project-directory read-project
-  project-digest line->allowed-project allowed-projects allow-project!
-  project-allowed? project-file project-files eval-file load-object
-  vm-module-directories normalize-file-name file-in-project selected-changes)
+  string->forwarded-port launcher-flags)
+
+(define-private (guix-microvm project)
+  project-digest line->allowed-project allowed-projects project-allowed?
+  project-file eval-file load-object vm-module-directories)
 
 (define-syntax-rule (values->list exp)
   (call-with-values (lambda () exp) list))
 
+;; An ssh that does nothing.
+(define %fake-ssh
+  '((program . "true") (options) (destination . "vm") (variables)
+    (secrets "/none")))
+
 (define (exit-code thunk)
-  "Return the status THUNK exits with or raises as a launcher error, or #f
-if it returns."
+  "Return the status THUNK exits with or raises an error for, or #f if it
+returns."
   (catch 'quit
     (lambda ()
-      (guard (error ((launcher-error? error)
-                     (launcher-error-status error)))
+      (guard (error ((microvm-error? error)
+                     (error-status error)))
         (thunk)
         #f))
     (lambda (key status) status)))
@@ -204,6 +217,23 @@ sleep."
         (volatile-vm? #:volatile-field? #t)
         (exit-code (cut volatile-vm? #:volatile? #t #:persistent? #t))))
 
+(test-equal "host-name"
+  '("my-project-vm" "my-project" #f)
+  (map host-name '("my-project-vm" "-My_Project." "...")))
+
+(test-equal "unique-name"
+  '("a-vm" "a-vm-3")
+  (list (unique-name "a-vm" '("b-vm"))
+        (unique-name "a-vm" '("a-vm" "a-vm-2"))))
+
+(test-equal "parse-invocation, name"
+  '("project-vm" "browser-vm")
+  (let ((project (string-append tmp "/Project")))
+    (mkdir-p project)
+    (map (lambda (args)
+           (invocation-name (parse-invocation args (test-config))))
+         `((,project) ("--name=browser-vm" ,project)))))
+
 (test-equal "parse-invocation"
   `(,(canonicalize-path tmp) ("make") #t #t 512 4)
   (with-environment '(("VM_MEMORY" . "512") ("VM_CPUS" . #f))
@@ -254,6 +284,22 @@ sleep."
               (exit-code (cut call-with-project-lock data "/" (const #t)))
               (exit-code (cut call-with-project-lock data "/pq" (const #t)))
               (call-with-project-lock data "/pq" (const 'ok)))))))
+
+(test-equal "call-with-project-lock, waiting"
+  '(1 ok)
+  (match (pipe)
+    ((input . output)
+     (let* ((data (string-append tmp "/waiting-data"))
+            (holder (call-with-new-thread
+                     (lambda ()
+                       (call-with-project-lock data "/p"
+                         (lambda ()
+                           (write-char #\x output)
+                           (force-output output)
+                           (usleep 200000)))))))
+       (read-char input)
+       (list (exit-code (cut call-with-project-lock data "/p" (const #t)))
+             (call-with-project-lock data "/p" (const 'ok) #:wait? #t))))))
 
 (test-equal "overlay-options"
   "lowerdir=/a\\,b\\:c\\\\d,upperdir=/u,workdir=/w,userxattr"
@@ -315,13 +361,13 @@ directory."
   (unless (user-xattrs? tmp)
     (test-skip "create-layer"))
   (test-assert "create-layer"
-    (let ((layer (quietly (cut create-layer data project #:cp "cp"))))
+    (let ((layer (quietly (cut create-layer! data project #:cp "cp"))))
       (and (file-exists? (layer-upper layer))
            (file-exists? (string-append (layer-lower layer) "/file"))
            (equal? project
                    (layer-project (open-layer (layer-directory layer))))
            (begin
-             (delete-layer layer)
+             (delete-layer! layer)
              (not (file-exists? (layer-directory layer)))))))
 
   (unless (user-xattrs? tmp)
@@ -331,7 +377,7 @@ directory."
     (let* ((layer #f)
            (warning (with-error-to-string
                      (lambda ()
-                       (set! layer (create-layer data project
+                       (set! layer (create-layer! data project
                                                  #:cp "false"))))))
       (list (layer-snapshot layer)
             (and (string-contains warning "cannot snapshot") #t)
@@ -344,7 +390,7 @@ directory."
     (test-skip "create-layer, no user extended attributes"))
   (test-equal "create-layer, no user extended attributes"
     1
-    (exit-code (cut create-layer data project #:cp "cp"))))
+    (exit-code (cut create-layer! data project #:cp "cp"))))
 
 (let ((project (string-append tmp "/overlaid")))
   (for-each (lambda (file)
@@ -358,7 +404,7 @@ directory."
       ("dir" replaced #f) ("dir/n" added #f) ("f" added #f) ("g" deleted #f)
       ("g2" added #f) ("link" added #f) ("new" added #f) ("new/f" added #f)
       ("sub/y" added #f))
-    (let ((layer (quietly (cut create-layer (string-append tmp "/data")
+    (let ((layer (quietly (cut create-layer! (string-append tmp "/data")
                                project #:cp "cp"))))
       (match (layer-overlay-arguments layer)
         ((lower upper work merged)
@@ -490,7 +536,7 @@ echo y > sub/y"
     (symlink "/nowhere" (string-append project "/link"))
     (let* ((plan (plan-merge layer (layer-changes layer)
                              #:git "git" #:directory directory))
-           (problems (append (plan-problems plan) (apply-plan layer plan))))
+           (problems (append (plan-problems plan) (apply-plan! layer plan))))
       (list (list (read-file (string-append project "/a"))
                   (read-file (string-append project "/b"))
                   (file-exists? (string-append project "/d/x"))
@@ -511,7 +557,7 @@ echo y > sub/y"
   (let ((layer (test-layer "protected-deletion"
                            #:start '((".envrc" . ""))
                            #:deleted '(".envrc"))))
-    (apply-plan layer (plan-merge layer (layer-changes layer)
+    (apply-plan! layer (plan-merge layer (layer-changes layer)
                                   #:git "git" #:directory tmp))
     (not (file-exists? (string-append (layer-project layer) "/.envrc")))))
 
@@ -532,7 +578,7 @@ echo y > sub/y"
   (let* ((layer (test-layer "read-only" #:vm '(("ro/f" . "f"))))
          (upper-ro (string-append (layer-upper layer) "/ro")))
     (chmod upper-ro #o555)
-    (apply-plan layer (plan-merge layer (layer-changes layer)
+    (apply-plan! layer (plan-merge layer (layer-changes layer)
                                   #:git "git" #:directory tmp))
     (list (read-file (string-append (layer-project layer) "/ro/f"))
           (stat:perms (stat (string-append (layer-project layer) "/ro"))))))
@@ -546,7 +592,7 @@ echo y > sub/y"
 (test-equal "resolve-layer, discard"
   '(discarded #f "B1\nb2\nb3\n")
   (let ((layer (merge-test-layer "discard")))
-    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'discard))
+    (list (quietly (cut resolve-layer! layer #:git "git" #:policy 'discard))
           (file-exists? (layer-directory layer))
           (read-file (string-append (layer-project layer) "/b")))))
 
@@ -560,7 +606,7 @@ echo y > sub/y"
 (test-equal "resolve-layer, merge with a conflict"
   '(conflict #t "host\n" #f)
   (let ((layer (strict-test-layer "conflict" "host\n")))
-    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
+    (list (quietly (cut resolve-layer! layer #:git "git" #:policy 'merge))
           (file-exists? (layer-directory layer))
           (read-file (string-append (layer-project layer) "/f"))
           (file-exists? (string-append (layer-project layer) "/new")))))
@@ -568,7 +614,7 @@ echo y > sub/y"
 (test-equal "resolve-layer, merge leaves protected files"
   '(merged #f "vm\n" "new\n" #f)
   (let ((layer (strict-test-layer "protected" "start\n")))
-    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'merge))
+    (list (quietly (cut resolve-layer! layer #:git "git" #:policy 'merge))
           (file-exists? (layer-directory layer))
           (read-file (string-append (layer-project layer) "/f"))
           (read-file (string-append (layer-project layer) "/new"))
@@ -577,14 +623,14 @@ echo y > sub/y"
 (test-equal "resolve-layer, keep"
   '(kept #t "start\n")
   (let ((layer (strict-test-layer "keep" "start\n")))
-    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'keep))
+    (list (quietly (cut resolve-layer! layer #:git "git" #:policy 'keep))
           (file-exists? (layer-directory layer))
           (read-file (string-append (layer-project layer) "/f")))))
 
 (test-equal "resolve-layer, nothing to keep"
   '(merged #f)
   (let ((layer (test-layer "empty")))
-    (list (quietly (cut resolve-layer layer #:git "git" #:policy 'keep))
+    (list (quietly (cut resolve-layer! layer #:git "git" #:policy 'keep))
           (file-exists? (layer-directory layer)))))
 
 (test-equal "vm-files"
@@ -759,11 +805,12 @@ echo y > sub/y"
   (printable "a\tb\r\n\x1b]52;c;eA==\x1b\\ä\x9b"))
 
 (test-equal "vm-kernel-arguments"
-  '(("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K" "a")
+  '(("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K"
+     "guix-microvm.host-name=n" "a")
     ("console=ttyS0" "panic=-1" "guix-microvm.ssh-key=K"
-     "guix-microvm.volatile=1" "a"))
-  (list (vm-kernel-arguments "K" #f '("a"))
-        (vm-kernel-arguments "K" #t '("a"))))
+     "guix-microvm.host-name=n" "guix-microvm.volatile=1" "a"))
+  (list (vm-kernel-arguments "K" #f "n" '("a"))
+        (vm-kernel-arguments "K" #t "n" '("a"))))
 
 (test-assert "qemu-arguments"
   (let ((arguments (qemu-arguments #:kernel "/k" #:initrd "/i"
@@ -905,13 +952,15 @@ echo y > sub/y"
     (call-with-port (open-log file) (cut display "new" <>))
     (call-with-input-file file get-string-all)))
 
-(test-assert "call-with-temporary-directory deletes it on exit"
+(test-assert "call-with-vm-directory deletes it on exit"
   (let ((directory #f))
-    (exit-code (lambda ()
-                 (call-with-temporary-directory tmp
-                   (lambda (d)
-                     (set! directory d)
-                     (exit 3)))))
+    (with-environment `(("XDG_RUNTIME_DIR" . ,tmp))
+      (lambda ()
+        (exit-code (lambda ()
+                     (call-with-vm-directory
+                       (lambda (d)
+                         (set! directory d)
+                         (exit 3)))))))
     (and directory (not (file-exists? directory)))))
 
 (test-equal "vm-module-directories finds the vms of every channel"
@@ -1035,39 +1084,44 @@ gives the commands received.  Each reply follows an event; the command
         (usb-host-arguments '(#x1050 . #x0407))))
 
 (test-equal "running-vms"
-  '(("a" "a" "/p" #t ((program . "/ssh"))))
-  (let* ((runtime (string-append tmp "/runtime"))
-         (locks
-          (filter-map (match-lambda
-                        ((directory name locked?)
-                         (let ((file (string-append runtime "/" directory
-                                                    "/vm")))
-                           (write-file file
-                                       (object->string
-                                        `((name . ,name) (directory . "/p")
-                                          (usb? . #t)
-                                          (ssh . ((program . "/ssh"))))))
-                           (and locked?
-                                (let ((port (open-input-file file)))
-                                  (flock port LOCK_EX)
-                                  port)))))
-                      '(("guix-microvm.a" "a" #t)
-                        ("guix-microvm.b" "b" #f)
-                        ("other" "c" #t)))))
-    (mkdir-p (string-append runtime "/guix-microvm.empty"))
-    (let ((vms (running-vms runtime)))
-      (for-each close-port locks)
-      (map (lambda (vm)
-             (list (running-vm-name vm) (running-vm-id vm)
-                   (running-vm-directory vm) (running-vm-usb? vm)
-                   (running-vm-ssh vm)))
-           vms))))
+  '(("a" "a" "/p" #t #t "guix-microvm.a/qmp.sock" ((program . "/ssh"))
+     "/run-vm" #t 42))
+  (let ((runtime (string-append tmp "/runtime")))
+    (for-each (lambda (name)
+                (mkdir-p (string-append runtime "/" name)))
+              '("guix-microvm.empty" "guix-microvm.b" "other"))
+    (register! (running-vm (state-directory (string-append runtime
+                                                           "/guix-microvm.b"))
+                           (name "b") (directory "/p") (ssh %fake-ssh)
+                           (launcher "/run-vm") (started 0)))
+    (let ((a (running-vm (state-directory (string-append runtime
+                                                         "/guix-microvm.a"))
+                         (name "a") (directory "/p") (usb? #t) (volatile? #t)
+                         (ssh '((program . "/ssh"))) (launcher "/run-vm")
+                         (started 42))))
+      (mkdir-p (running-vm-state-directory a))
+      (call-with-registration a
+        (lambda ()
+          (register! (running-vm (inherit a) (detached? #t)))
+          (map (lambda (vm)
+                 (list (running-vm-name vm) (running-vm-id vm)
+                       (running-vm-directory vm) (running-vm-usb? vm)
+                       (running-vm-volatile? vm)
+                       (string-drop (running-vm-qmp-socket vm)
+                                    (+ 1 (string-length runtime)))
+                       (running-vm-ssh vm) (running-vm-launcher vm)
+                       (running-vm-detached? vm) (running-vm-started vm)))
+               (running-vms runtime)))))))
 
 (test-equal "kill-vm!"
   '("qmp_capabilities" "quit")
-  (let* ((file (string-append tmp "/stop.sock"))
-         (server (fake-qmp-server file)))
-    (kill-vm! (running-vm "vm" "id" "/p" #f file #f))
+  (let* ((state (string-append tmp "/stop"))
+         (server (begin
+                   (mkdir-p state)
+                   (fake-qmp-server (qmp-socket-file state)))))
+    (kill-vm! (running-vm (state-directory state) (name "vm")
+                          (directory "/p") (ssh %fake-ssh)
+                          (launcher "/run-vm") (started 0)))
     (join-thread server)))
 
 (test-equal "call-with-qmp"
@@ -1086,24 +1140,22 @@ gives the commands received.  Each reply follows an event; the command
     "no USB device ffff is plugged in")
   (map (lambda (usb?)
          (error-message
-          (cut attach-usb! (running-vm "vm" "id" "/p" usb? "/none.sock" #f)
+          (cut attach-usb! (running-vm (state-directory "/none") (name "vm")
+                                       (directory "/p") (usb? usb?)
+                                       (ssh %fake-ssh) (launcher "/run-vm")
+                                       (started 0))
                '(#xffff . #f))))
        '(#f #t)))
-
-(test-equal "attach-vm!, older VM"
-  "vm was started by an older guix-microvm, which does not allow attaching"
-  (error-message (cut attach-vm! (running-vm "vm" "id" "/p" #f "/none" #f))))
 
 (test-equal "normalize-file-name"
   '("/a/c" "/" "/a")
   (map normalize-file-name '("/a/./b/../c/" "/.." "//a//")))
 
-(test-equal "file-in-project"
-  '("" "x" 1)
-  (list (file-in-project "/p" "/p/")
-        (file-in-project "/p" "/p/src/../x")
-        (exit-code (lambda ()
-                     (quietly (cut file-in-project "/p" "/q"))))))
+(test-equal "file-under"
+  '("" "x" #f)
+  (list (file-under "/p" "/p/")
+        (file-under "/p" "/p/src/../x")
+        (file-under "/p" "/q")))
 
 (test-equal "selected-changes"
   '(3 ("src/b") 3)
@@ -1128,7 +1180,7 @@ gives the commands received.  Each reply follows an event; the command
   (map line->allowed-project '("abc /p q" "" "abc")))
 
 (test-equal "launcher-flags"
-  '(() ("--stateless" "--persistent" "--merge"))
+  '(("--name=x-vm") ("--stateless" "--persistent" "--merge"))
   (list (launcher-flags '((vm . "x")))
         (launcher-flags '((merge? . #t) (stateless? . #t)
                           (persistent? . #t)))))
@@ -1160,16 +1212,6 @@ gives the commands received.  Each reply follows an event; the command
   (test-equal "read-project"
     '((("manifest.scm" . #vu8(49))) ())
     (list (read-project project) (read-project #f)))
-
-  (test-equal "project-files"
-    `((#f (,manifest . #vu8(49)))
-      ((,vm . #vu8(118)) (,manifest . #vu8(49))))
-    (begin
-      (write-file vm "v")
-      (let ((contents (read-project project)))
-        (map (lambda (opts)
-               (values->list (project-files opts project contents)))
-             '(((vm . "claude-vm")) ())))))
 
   (test-equal "load-object evaluates the contents read, not the file"
     2
@@ -1218,9 +1260,87 @@ gives the commands received.  Each reply follows an event; the command
           (sort (map car (allowed-projects)) string<?)))
 
       (test-assert "project-digest changes when a file disappears"
-        (let ((before (digest)))
+        (let ((before (begin
+                        (write-file vm "v")
+                        (digest))))
           (delete-file vm)
           (not (equal? before (digest))))))))
+
+(define (access->list access)
+  (list (file-access-file access) (file-access-permissions access)))
+
+(define (unix-socket file)
+  (bind (socket PF_UNIX SOCK_STREAM 0) AF_UNIX file)
+  file)
+
+(define (call-with-rules-directory proc)
+  (proc (mkdtemp (string-append tmp "/rules-XXXXXX"))))
+
+(test-equal "qemu-accesses, missing file"
+  '()
+  (qemu-accesses '("-append" "rdinit=/init")))
+
+(test-equal "qemu-accesses, files only in file options"
+  '(() () (("/dev/null" (read write ioctl))))
+  (map (compose (cut map access->list <>) qemu-accesses)
+       '(("-append" "root=/dev/null")
+         ("-device" "root=/dev/null")
+         ("-drive" "file=/dev/null"))))
+
+(test-equal "qemu-accesses, server socket"
+  '(("/tmp" (make-socket)))
+  (map access->list
+       (qemu-accesses
+        '("-chardev" "socket,id=m,path=/tmp/qmp.sock,server=on"))))
+
+(test-equal "qemu-accesses, read-only file"
+  '((read))
+  (call-with-rules-directory
+   (lambda (directory)
+     (let ((image (string-append directory "/disk.img")))
+       (write-file image "")
+       (map (compose cadr access->list)
+            (qemu-accesses
+             (list (string-append "file=" image ",readonly=on"))))))))
+
+(test-assert "qemu-accesses, client socket"
+  (call-with-rules-directory
+   (lambda (directory)
+     (let ((path (unix-socket (string-append directory "/s"))))
+       (equal? (map access->list
+                    (qemu-accesses
+                     (list (string-append "socket,id=c,path=" path))))
+               `((,path (connect))))))))
+
+(test-assert "qemu-accesses, unix: prefix"
+  (call-with-rules-directory
+   (lambda (directory)
+     (let ((path (unix-socket (string-append directory "/s"))))
+       (equal? (map access->list
+                    (qemu-accesses (list "-qmp" (string-append "unix:" path))))
+               `((,path (connect))))))))
+
+(test-assert "qemu-accesses, stale server socket"
+  (call-with-rules-directory
+   (lambda (directory)
+     (let ((path (unix-socket (string-append directory "/s"))))
+       (and (equal? (map access->list
+                         (qemu-accesses
+                          (list (string-append "socket,id=m,path=" path
+                                               ",server=on"))))
+                    `((,directory (make-socket))))
+            (not (file-exists? path)))))))
+
+(test-equal "waypipe-client-accesses"
+  `((("/run/vm" (make-socket))) (("/run/vm" (make-socket)))
+    (("/run/vm" (make-socket))) ((,(getcwd) (make-socket))) () ())
+  (map (compose (cut map access->list <>) waypipe-client-accesses)
+       '(("--socket" "/run/vm/w.sock" "--no-gpu" "client")
+         ("-s" "/run/vm/w.sock" "client")
+         ("--socket=/run/vm/w.sock" "client")
+         ("--socket" "w.sock" "client")
+         ("--socket" "/run/vm/w.sock" "server" "--" "foot")
+         ("client"))))
 
 (delete-tree tmp)
 
