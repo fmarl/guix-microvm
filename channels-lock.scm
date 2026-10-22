@@ -12,7 +12,7 @@
        (name 'guix-cage)
        (url "https://github.com/fmarl/guix-cage")
        (branch "main")
-       (commit "997686e98c05e49f338d0b4cea8e2c8026120ca7")
+       (commit "77e1096a8cd36ef8bc9a12d903f2c4fa32dc0461")
        (introduction
         (make-channel-introduction
          "56a634b5aae8a3c4e12a292ba87ac336a27ddcbc"
