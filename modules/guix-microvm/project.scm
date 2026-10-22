@@ -10,14 +10,15 @@
   #:use-module ((guix utils)
                 #:select (config-directory with-atomic-file-output))
   #:use-module ((guix base16) #:select (bytevector->base16-string))
+  #:use-module ((guix build utils) #:select (directory-exists?))
   #:use-module ((gcrypt hash) #:select (sha256))
   #:use-module (gnu system)
   #:use-module (guix-microvm base)
+  #:use-module ((guix-microvm build files) #:select (directory-files))
   #:use-module (guix-microvm microvm)
   #:use-module ((ice-9 binary-ports) #:select (get-bytevector-all))
   #:use-module (ice-9 eval-string)
   #:use-module ((ice-9 exceptions) #:select (exception-kind exception-args))
-  #:use-module ((ice-9 ftw) #:select (scandir))
   #:use-module (ice-9 match)
   #:use-module (ice-9 textual-ports)
   #:use-module ((rnrs bytevectors) #:select (string->utf8 utf8->string))
@@ -174,20 +175,13 @@ unless VALID? says it is a KIND."
 (define (vm-module-directories)
   "Return the CHANNEL/vms directories of %load-path, as pairs of the
 directory in %load-path and CHANNEL/vms."
-  (define (directory? file)
-    (and=> (stat file #f)
-           (lambda (st)
-             (eq? 'directory (stat:type st)))))
-
   (append-map (lambda (directory)
                 (filter-map (lambda (name)
                               (let ((sub (string-append name "/vms")))
-                                (and (directory? (string-append directory
-                                                                "/" sub))
+                                (and (directory-exists?
+                                      (string-append directory "/" sub))
                                      (cons directory sub))))
-                            (or (scandir directory
-                                         (negate (cut member <> '("." ".."))))
-                                '())))
+                            (or (directory-files directory) '())))
               %load-path))
 
 (define (predefined-microvms)

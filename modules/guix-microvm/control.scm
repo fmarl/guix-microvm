@@ -4,6 +4,7 @@
 (define-module (guix-microvm control)
   #:use-module (guix diagnostics)
   #:use-module (guix i18n)
+  #:use-module ((guix-microvm build files) #:select (directory-files))
   #:use-module ((guix-microvm build layer) #:select (layer-upper))
   #:use-module (guix-microvm build process)
   #:use-module (guix-microvm build registry)
@@ -42,8 +43,7 @@
 (define (running-vm-changed? vm)
   "Return true if VM, or one before it, changed files of its project."
   (any (lambda (layer)
-         (pair? (scandir (layer-upper layer)
-                         (negate (cut member <> '("." ".."))))))
+         (pair? (directory-files (layer-upper layer))))
        (project-layers (data-directory) (running-vm-directory vm))))
 
 (define (qmp-receive port)
