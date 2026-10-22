@@ -6,9 +6,11 @@
   #:export (%program-name
             microvm-error?
             usage-error?
+            &boot-failure
             error-status
             fail
             usage-error
+            boot-failure
             call-with-launcher-errors))
 
 (define %program-name
@@ -21,6 +23,9 @@
 (define-exception-type &usage-error &microvm-error
   make-usage-error usage-error?)
 
+(define-exception-type &boot-failure &microvm-error
+  make-boot-failure boot-failure?)
+
 (define (fail message . args)
   "Raise an error, formatting MESSAGE with ARGS."
   (raise-exception (make-microvm-error (apply format #f message args))))
@@ -29,6 +34,10 @@
   "Raise a usage error showing USAGE."
   (raise-exception
    (make-usage-error (format #f "usage: ~a ~a" (%program-name) usage))))
+
+(define (boot-failure message . args)
+  "Raise an error that the VM did not come up, formatting MESSAGE with ARGS."
+  (raise-exception (make-boot-failure (apply format #f message args))))
 
 (define (error-status error)
   (if (usage-error? error) 2 1))

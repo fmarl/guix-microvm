@@ -4,6 +4,7 @@
 (define-module (guix-microvm build microvm)
   #:use-module ((guix build utils) #:select (mkdir-p))
   #:use-module (guix records)
+  #:use-module ((ice-9 exceptions) #:select (exception-message))
   #:use-module (ice-9 match)
   #:use-module ((ice-9 textual-ports) #:select (get-string-all))
   #:use-module (srfi srfi-1)
@@ -126,27 +127,32 @@ than newline and tab replaced by ?."
                     char))
               (string-delete #\return str)))
 
-(define* (boot-failure-handler log #:key show-log?)
-  "Return a procedure that fails with a boot error message.  It prints the
-console LOG if SHOW-LOG?, or else names it."
-  (lambda (message)
-    (if show-log?
-        (begin
-          (display (printable (call-with-input-file log get-string-all))
-                   (current-error-port))
-          (fail "~a" message))
-        (fail "~a, see ~a" message log))))
+(define* (call-with-boot-log log thunk #:key show-log?)
+  "Call THUNK.  On a boot failure, print the console LOG if SHOW-LOG?, or
+else name it."
+  (with-exception-handler
+      (lambda (error)
+        (let ((message (exception-message error)))
+          (if show-log?
+              (begin
+                (display (printable (call-with-input-file log get-string-all))
+                         (current-error-port))
+                (fail "~a" message))
+              (fail "~a, see ~a" message log))))
+    thunk
+    #:unwind? #t
+    #:unwind-for-type &boot-failure))
 
-(define (wait-for-boot spawn-ssh qemu timeout on-failure)
-  "Wait until the VM of the QEMU process accepts SSH.  Call ON-FAILURE with
-a message if QEMU exits or TIMEOUT seconds pass first."
+(define (wait-for-boot spawn-ssh qemu timeout)
+  "Wait until the VM of the QEMU process accepts SSH.  Raise a boot failure
+if QEMU exits or TIMEOUT seconds pass first."
   (let ((deadline (+ (current-time) timeout)))
     (let loop ()
       (unless (ssh-succeeds? spawn-ssh "true")
         (cond ((not (child-alive? qemu))
-               (on-failure "the VM exited"))
+               (boot-failure "the VM exited"))
               ((> (current-time) deadline)
-               (on-failure "no SSH connection to the VM"))
+               (boot-failure "no SSH connection to the VM"))
               (else
                (sleep 1)
                (loop)))))))
@@ -238,7 +244,6 @@ wait until the VM is killed."
                           cid))
              (spawn-ssh (vm-ssh-spawner ssh))
              (status-file (guest-status-file guest-runtime-directory))
-             (on-failure (boot-failure-handler log #:show-log? stateless?))
              (vm (running-vm
                    (state-directory tmp)
                    (name name)
@@ -249,8 +254,7 @@ wait until the VM is killed."
                    (launcher (canonicalize-path (car (command-line))))
                    (started (current-time)))))
         (define (boot qemu)
-          (wait-for-boot spawn-ssh qemu (invocation-boot-timeout invocation)
-                         on-failure)
+          (wait-for-boot spawn-ssh qemu (invocation-boot-timeout invocation))
           (let ((status
                  (run-remote spawn-ssh qemu
                              (remote-command command wrapper status-file)
@@ -273,15 +277,18 @@ microvm attach' opens a shell, 'guix microvm kill' stops it~%"
           (lambda ()
             (call-with-port (open-log log)
               (lambda (port)
-                (call-with-servers servers
-                    (lambda ()
-                      (call-with-process (tools-qemu tools)
-                          (vm-qemu-arguments tmp invocation config shares
-                                             #:key-blob key-blob #:cid cid
-                                             #:log log)
-                        boot
-                        #:output port #:error port))
-                  #:log port #:on-failure on-failure)))))))))
+                (call-with-boot-log log
+                  (lambda ()
+                    (call-with-servers servers
+                        (lambda ()
+                          (call-with-process (tools-qemu tools)
+                              (vm-qemu-arguments tmp invocation config shares
+                                                 #:key-blob key-blob #:cid cid
+                                                 #:log log)
+                            boot
+                            #:output port #:error port))
+                      #:log port))
+                  #:show-log? stateless?)))))))))
 
 (define (effective-policy policy interactive?)
   "Return POLICY, or 'keep for 'ask unless INTERACTIVE?."

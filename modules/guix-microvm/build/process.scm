@@ -76,25 +76,24 @@ PROC with its PID.  Stop it when PROC returns or exits."
 (define (socket-file directory name)
   (string-append directory "/" name ".sock"))
 
-(define (wait-for-socket file pid on-failure)
+(define (wait-for-socket file pid)
   (let loop ()
     (unless (file-exists? file)
       (unless (child-alive? pid)
-        (on-failure (format #f "no ~a, the program serving it exited" file)))
+        (boot-failure "no ~a, the program serving it exited" file))
       (usleep 100000)
       (loop))))
 
 (define* (call-with-servers servers thunk
-                            #:key (log (current-error-port))
-                            (on-failure (cut fail "~a" <>)))
+                            #:key (log (current-error-port)))
   "Start SERVERS in order, their output to LOG, call THUNK once all are up,
-and stop them when it returns or exits.  Call ON-FAILURE with a message if
-one exits first."
+and stop them when it returns or exits.  Raise a boot failure if one exits
+first."
   (match servers
     (() (thunk))
     ((first rest ...)
      (call-with-process (server-program first) (server-arguments first)
        (lambda (pid)
-         (wait-for-socket (server-socket first) pid on-failure)
-         (call-with-servers rest thunk #:log log #:on-failure on-failure))
+         (wait-for-socket (server-socket first) pid)
+         (call-with-servers rest thunk #:log log))
        #:output log #:error log))))
