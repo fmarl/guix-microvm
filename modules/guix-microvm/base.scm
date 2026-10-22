@@ -157,12 +157,12 @@
     (with-imported-modules '((guix build utils))
       #~(begin
           (use-modules (guix build utils))
-          (for-each mkdir-p '("/var/log" "/var/empty" "/var/db"
-                              "/var/guix/gcroots" "/mnt" "/bin" "/home"))
+          (for-each mkdir-p '("/var/empty" "/var/db" "/var/guix/gcroots"
+                              "/mnt"))
           (for-each (lambda (directory)
                       (mkdir-p directory)
                       (chmod directory #o1777))
-                    '("/tmp" "/var/tmp" "/var/lock"))
+                    '("/var/tmp" "/var/lock"))
           (let ((runtime #$(microvm-guest-runtime-directory config)))
             (mkdir-p runtime)
             (chown runtime #$uid #$gid)
