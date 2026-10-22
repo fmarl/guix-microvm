@@ -18,6 +18,7 @@
             directory-files
             tree-entries
             same-contents?
+            lock-held?
             delete-tree
             temporary-file
             call-with-temporary-file))
@@ -96,6 +97,16 @@ to ROOT and its stat."
                     (else #f)))))
         #:binary #t))
     #:binary #t))
+
+(define (lock-held? file)
+  (call-with-input-file file
+    (lambda (port)
+      (catch 'system-error
+        (lambda ()
+          (flock port (logior LOCK_SH LOCK_NB))
+          #f)
+        (lambda args
+          (= EWOULDBLOCK (system-error-errno args)))))))
 
 (define (delete-tree directory)
   ;; overlayfs leaves its work directory without permissions.

@@ -43,16 +43,6 @@ project; use a subdirectory, or --volatile" directory))
   (or (contains-file? directory other)
       (contains-file? other directory)))
 
-(define (lock-held? file)
-  (call-with-input-file file
-    (lambda (port)
-      (catch 'system-error
-        (lambda ()
-          (flock port (logior LOCK_SH LOCK_NB))
-          #f)
-        (lambda args
-          (= EWOULDBLOCK (system-error-errno args)))))))
-
 (define* (call-with-project-lock data directory thunk #:key wait?)
   "Call THUNK holding the lock of the project DIRECTORY in DATA, waiting for
 it if WAIT?.  Fail if a VM runs on DIRECTORY, one of its parents or one of

@@ -8,6 +8,7 @@
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
+  #:use-module ((guix-microvm build files) #:select (lock-held?))
   #:use-module (guix-microvm build process)
   #:export (runtime-directory
             call-with-vm-directory
@@ -112,16 +113,6 @@ exits."
 (define (owned? file)
   (= (stat:uid (lstat file)) (getuid)))
 
-(define (locked? file)
-  (call-with-input-file file
-    (lambda (port)
-      (catch 'system-error
-        (lambda ()
-          (flock port (logior LOCK_SH LOCK_NB))
-          #f)
-        (lambda args
-          (= EWOULDBLOCK (system-error-errno args)))))))
-
 (define (read-running-vm directory)
   "Return the VM running from DIRECTORY, or #f."
   (let ((lock (lock-file directory))
@@ -129,7 +120,7 @@ exits."
     (match (false-if-exception
             (and (owned? directory)
                  (owned? lock)
-                 (locked? lock)
+                 (lock-held? lock)
                  (owned? info)
                  (call-with-input-file info read)))
       ((? list? sexp) (sexp->running-vm directory sexp))
