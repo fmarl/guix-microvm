@@ -24,7 +24,7 @@
            (preserved-environment-variables
             (cons "QEMU_*" %default-preserved-environment-variables))
            ;; KVM only, without TCG's code generator
-           (executes? #f)
+           (executes-others? #f)
            (deny-write-execute? #t)))))
 
 (define-public waypipe-locked
@@ -35,8 +35,8 @@
            (program (file-append waypipe "/bin/waypipe"))
            (rules (list %waypipe-client
                         ;; Outside a security context, to create its own
-                        %full-wayland
+                        %privileged-wayland
                         ;; For the socket of its security context
                         %runtime-directory))
-           (executes? #f)
+           (executes-others? #f)
            (deny-write-execute? #t)))))
